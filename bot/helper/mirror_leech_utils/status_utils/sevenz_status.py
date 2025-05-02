@@ -51,6 +51,8 @@ class SevenZStatus:
     def status(self):
         if self._cstatus == "Extract":
             return MirrorStatus.STATUS_EXTRACT
+        if self._cstatus == "Compress":
+            return MirrorStatus.STATUS_COMPRESS
         return MirrorStatus.STATUS_ARCHIVE
 
     def task(self):

@@ -6,6 +6,7 @@ class ButtonMaker:
         self._button = []
         self._header_button = []
         self._footer_button = []
+        self._page_button = []
 
     def url_button(self, key, link, position=None):
         if not position:
@@ -26,8 +27,12 @@ class ButtonMaker:
             self._footer_button.append(
                 InlineKeyboardButton(text=key, callback_data=data),
             )
+        elif position == "page":
+            self._page_button.append(
+                InlineKeyboardButton(text=key, callback_data=data),
+            )
 
-    def build_menu(self, b_cols=1, h_cols=8, f_cols=8):
+    def build_menu(self, b_cols=1, h_cols=8, f_cols=8, p_cols=8):
         menu = [
             self._button[i : i + b_cols] for i in range(0, len(self._button), b_cols)
         ]
@@ -41,6 +46,15 @@ class ButtonMaker:
                 menu = header_buttons + menu
             else:
                 menu.insert(0, self._header_button)
+        if self._page_button:
+            if len(self._page_button) > p_cols:
+                page_buttons = [
+                    self._page_button[i : i + p_cols]
+                    for i in range(0, len(self._page_button), p_cols)
+                ]
+                menu.extend(page_buttons)
+            else:
+                menu.append(self._page_button)
         if self._footer_button:
             if len(self._footer_button) > f_cols:
                 [
@@ -55,3 +69,4 @@ class ButtonMaker:
         self._button = []
         self._header_button = []
         self._footer_button = []
+        self._page_button = []

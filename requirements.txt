@@ -5,6 +5,7 @@ anytree
 apscheduler
 aioaria2
 aioqbt
+cinemagoer
 cloudscraper
 dnspython
 electrogram
@@ -20,11 +21,14 @@ langcodes
 lxml
 motor
 natsort
+pycountry
 pillow
 psutil
 pyshorteners
 python-magic
 pytz
+PyPDF2
+reportlab
 requests
 speedtest-cli
 telegraph

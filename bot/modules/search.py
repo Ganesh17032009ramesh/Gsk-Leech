@@ -1,3 +1,4 @@
+from asyncio import create_task
 from html import escape
 from urllib.parse import quote
 
@@ -7,28 +8,88 @@ from bot.helper.ext_utils.bot_utils import new_task
 from bot.helper.ext_utils.status_utils import get_readable_file_size
 from bot.helper.ext_utils.telegraph_helper import telegraph
 from bot.helper.telegram_helper.button_build import ButtonMaker
-from bot.helper.telegram_helper.message_utils import edit_message, send_message
+from bot.helper.telegram_helper.message_utils import (
+    auto_delete_message,
+    delete_message,
+    edit_message,
+    send_message,
+)
+
+search_keys = {}  # Dictionary to store search keys by user_id
 
 PLUGINS = []
 TELEGRAPH_LIMIT = 300
 SEARCH_PLUGINS = [
-    "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/piratebay.py",
     "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/limetorrents.py",
     "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/torlock.py",
-    "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/torrentscsv.py",
-    "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/eztv.py",
     "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/torrentproject.py",
-    "https://raw.githubusercontent.com/MaurizioRicci/qBittorrent_search_engines/master/kickass_torrent.py",
-    "https://raw.githubusercontent.com/MaurizioRicci/qBittorrent_search_engines/master/yts_am.py",
-    "https://raw.githubusercontent.com/MadeOfMagicAndWires/qBit-plugins/master/engines/linuxtracker.py",
-    "https://raw.githubusercontent.com/MadeOfMagicAndWires/qBit-plugins/master/engines/nyaasi.py",
+    "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/eztv.py",
     "https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/ettv.py",
-    "https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/glotorrents.py",
+    "https://gist.githubusercontent.com/scadams/56635407b8dfb8f5f7ede6873922ac8b/raw/f654c10468a0b9945bec9bf31e216993c9b7a961/one337x.py",
     "https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/thepiratebay.py",
-    "https://raw.githubusercontent.com/v1k45/1337x-qBittorrent-search-plugin/master/leetx.py",
+    "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/piratebay.py",
+    "https://scare.ca/dl/qBittorrent/thepiratebay.py",
+    "https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/kickasstorrents.py",
+    "https://raw.githubusercontent.com/MadeOfMagicAndWires/qBit-plugins/master/engines/nyaasi.py",
+    "https://raw.githubusercontent.com/lazulyra/qbit-plugins/main/yts_mx/yts_mx.py",
     "https://raw.githubusercontent.com/nindogo/qbtSearchScripts/master/magnetdl.py",
+    "https://scare.ca/dl/qBittorrent/magnetdl.py",
+    "https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/academictorrents.py",
+    "https://raw.githubusercontent.com/nindogo/qbtSearchScripts/master/torrentgalaxy.py",
+    "https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/torrentdownload.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/torrentdownloads.py",
+    "https://scare.ca/dl/qBittorrent/torrentdownload.py",
+    "https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/yourbittorrent.py",
+    "https://raw.githubusercontent.com/444995/qbit-search-plugins/main/engines/zooqle.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/bitsearch.py",
     "https://raw.githubusercontent.com/msagca/qbittorrent_plugins/main/uniondht.py",
-    "https://raw.githubusercontent.com/khensolomon/leyts/master/yts.py",
+    "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/torrentscsv.py",
+    "https://raw.githubusercontent.com/v1k45/1337x-qBittorrent-search-plugin/master/leetx.py",
+    "https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/solidtorrents.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/solidtorrents.py",
+    "https://raw.githubusercontent.com/MadeOfMagicAndWires/qBit-plugins/master/engines/linuxtracker.py",
+    "https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/glotorrents.py",
+    "https://raw.githubusercontent.com/Cc050511/qBit-search-plugins/main/acgrip.py",
+    "https://raw.githubusercontent.com/nindogo/qbtSearchScripts/master/anidex.py",
+    "https://raw.githubusercontent.com/AlaaBrahim/qBitTorrent-animetosho-search-plugin/main/animetosho.py",
+    "https://raw.githubusercontent.com/nklido/qBittorrent_search_engines/master/engines/audiobookbay.py",
+    "https://raw.githubusercontent.com/TuckerWarlock/qbittorrent-search-plugins/main/bt4gprx.com/bt4gprx.py",
+    "https://raw.githubusercontent.com/galaris/BTDigg-qBittorrent-plugin/main/btdig.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/calidadtorrent.py",
+    "https://raw.githubusercontent.com/444995/qbit-search-plugins/main/engines/torrentleech.py",
+    "https://raw.githubusercontent.com/evyd13/search-plugins/master/nova3/engines/redacted_ch.py",
+    "https://raw.githubusercontent.com/444995/qbit-search-plugins/main/engines/danishbytes.py",
+    "https://raw.githubusercontent.com/YGGverse/qbittorrent-yggtracker-search-plugin/main/yggtracker.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/torrenflix.py",
+    "https://raw.githubusercontent.com/menegop/qbfrench/master/torrent9.py",
+    "https://raw.githubusercontent.com/BrunoReX/qBittorrent-Search-Plugin-TokyoToshokan/master/tokyotoshokan.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/tomadivx.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/therarbg.py",
+    "https://raw.githubusercontent.com/libellula/qbt-plugins/main/sukebei.py",
+    "https://raw.githubusercontent.com/phuongtailtranminh/qBittorrent-Nyaa-Search-Plugin/master/nyaa.py",
+    "https://github.com/vt-idiot/qBit-SukebeiNyaa-plugin/raw/master/engines/sukebeisi.py",
+    "https://raw.githubusercontent.com/kli885/qBittorent-SubsPlease-Search-Plugin/main/subsplease.py",
+    "https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/snowfl.py",
+    "https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/rockbox.py",
+    "https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/pirateiro.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/pediatorrent.py",
+    "https://raw.githubusercontent.com/dangar16/pediatorrent-plugin/refs/heads/main/pediatorrent.py",
+    "https://raw.githubusercontent.com/MadeOfMagicAndWires/qBit-plugins/refs/heads/main/engines/nyaapantsu.py",
+    "https://raw.githubusercontent.com/libellula/qbt-plugins/main/pantsu.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/naranjatorrent.py",
+    "https://raw.githubusercontent.com/Cc050511/qBit-search-plugins/main/mikanani.py",
+    "https://raw.githubusercontent.com/iordic/qbittorrent-search-plugins/master/engines/mejortorrent.py",
+    "https://raw.githubusercontent.com/joseeloren/search-plugins/master/nova3/engines/maxitorrent.py",
+    "https://raw.githubusercontent.com/Bioux1/qbtSearchPlugins/main/fitgirl_repacks.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/esmeraldatorrent.py",
+    "https://raw.githubusercontent.com/iordic/qbittorrent-search-plugins/master/engines/elitetorrent.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/dontorrent.py",
+    "https://raw.githubusercontent.com/dangar16/dontorrent-plugin/main/dontorrent.py",
+    "https://raw.githubusercontent.com/diazchika/dmhy/main/dmhy.py",
+    "https://raw.githubusercontent.com/ZH1637/dmhy/main/dmhy.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/divxtotal.py",
+    "https://raw.githubusercontent.com/elazar/qbittorrent-search-plugins/refs/heads/add-cloudtorrents-plugin/nova3/engines/cloudtorrents.py",
+    "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/calidadtorrent.py",
 ]
 
 
@@ -41,7 +102,7 @@ async def initiate_search_tools():
     await TorrentManager.qbittorrent.search.install_plugin(SEARCH_PLUGINS)
 
 
-async def search(key, site, message):
+async def search(key, site, message, user_tag=""):
     LOGGER.info(f"PLUGINS Searching: {key} from {site}")
     search = await TorrentManager.qbittorrent.search.start(
         pattern=key,
@@ -61,19 +122,28 @@ async def search(key, site, message):
     search_results = dict_search_results.results
     total_results = dict_search_results.total
     if total_results == 0:
-        await edit_message(
+        error_msg = await edit_message(
             message,
             f"No result found for <i>{key}</i>\nTorrent Site:- <i>{site.capitalize()}</i>",
         )
+        create_task(  # noqa: RUF006
+            auto_delete_message(error_msg, time=300),
+        )  # Auto-delete after 5 minutes
         return
-    msg = f"<b>Found {min(total_results, TELEGRAPH_LIMIT)}</b>"
-    msg += f" <b>result(s) for <i>{key}</i>\nTorrent Site:- <i>{site.capitalize()}</i></b>"
+
+    # Format the message with user tag in a blockquote
+    msg = f"<b><blockquote>{user_tag}, Found {min(total_results, TELEGRAPH_LIMIT)}"
+    msg += f" result(s) for <i>{key}</i></blockquote></b>\n\n<b>Torrent Site:- <i>{site.capitalize()}</i></b>"
+
     await TorrentManager.qbittorrent.search.delete(search_id)
     link = await get_result(search_results, key, message)
     buttons = ButtonMaker()
     buttons.url_button("🔎 VIEW", link)
     button = buttons.build_menu(1)
-    await edit_message(message, msg, button)
+    result_msg = await edit_message(message, msg, button)
+    create_task(  # noqa: RUF006
+        auto_delete_message(result_msg, time=300),
+    )  # Auto-delete after 5 minutes
 
 
 async def get_result(search_results, key, message):
@@ -126,7 +196,7 @@ async def plugin_buttons(user_id):
     if not PLUGINS:
         pl = await TorrentManager.qbittorrent.search.plugins()
         for i in pl:
-            PLUGINS.append(i.name)
+            PLUGINS.append(i.name)  # noqa: PERF401
     for siteName in PLUGINS:
         buttons.data_button(
             siteName.capitalize(),
@@ -140,35 +210,86 @@ async def plugin_buttons(user_id):
 @new_task
 async def torrent_search(_, message):
     user_id = message.from_user.id
-    key = message.text.split()
-    if len(key) == 1:
-        await send_message(message, "Send a search key along with command")
+    msg_parts = message.text.split(maxsplit=1)
+
+    if len(msg_parts) == 1:
+        # No search key provided
+        error_msg = await send_message(
+            message,
+            "Send a search key along with command",
+        )
+        create_task(  # noqa: RUF006
+            auto_delete_message(error_msg, message, time=300),
+        )  # Auto-delete after 5 minutes
     else:
+        # Search key provided
+        search_key = msg_parts[1].strip()
+        # Store the search key in the global dictionary
+        search_keys[user_id] = search_key
+
+        await delete_message(message)
         button = await plugin_buttons(user_id)
-        await send_message(message, "Choose site to search | Plugins:", button)
+
+        # Store the search key in the message text
+        await send_message(
+            message,
+            f"Choose site to search for <b>{search_key}</b> | Plugins:",
+            button,
+        )
 
 
 @new_task
 async def torrent_search_update(_, query):
     user_id = query.from_user.id
     message = query.message
-    key = message.reply_to_message.text.split(maxsplit=1)
-    key = key[1].strip() if len(key) > 1 else None
     data = query.data.split()
+
+    # Get the search key from the global dictionary
+    search_key = search_keys.get(user_id)
+    LOGGER.info(f"Retrieved search key for user {user_id}: {search_key}")
+
     if user_id != int(data[1]):
         await query.answer("Not Yours!", show_alert=True)
     elif data[2] == "plugin":
         await query.answer()
         button = await plugin_buttons(user_id)
-        await edit_message(message, "Choose site:", button)
+        await edit_message(
+            message,
+            f"Choose site to search for <b>{search_key}</b>:",
+            button,
+        )
     elif data[2] != "cancel":
         await query.answer()
         site = data[2]
-        await edit_message(
-            message,
-            f"<b>Searching for <i>{key}</i>\nTorrent Site:- <i>{site.capitalize()}</i></b>",
-        )
-        await search(key, site, message)
+
+        if search_key:
+            # Get user tag for mention
+            user = query.from_user
+            user_tag = f"@{user.username}" if user.username else user.mention
+
+            LOGGER.info(f"Searching for '{search_key}' on site '{site}'")
+            await edit_message(
+                message,
+                f"<b><blockquote>{user_tag}, Searching for <i>{search_key}</i></blockquote>\n\nTorrent Site:- <i>{site.capitalize()}</i></b>",
+            )
+            await search(search_key, site, message, user_tag)
+        else:
+            LOGGER.error(f"Search key not found for user {user_id}")
+            error_msg = await edit_message(
+                message,
+                "Search key not found. Please try again with a search term.",
+            )
+            create_task(  # noqa: RUF006
+                auto_delete_message(error_msg, time=300),
+            )  # Auto-delete after 5 minutes
     else:
         await query.answer()
-        await edit_message(message, "Search has been canceled!")
+        cancel_msg = await edit_message(message, "Search has been canceled!")
+        create_task(  # noqa: RUF006
+            auto_delete_message(cancel_msg, time=300),
+        )  # Auto-delete after 5 minutes
+        # Clean up the dictionary entry when canceling
+        search_keys.pop(
+            user_id,
+            None,
+        )  # Using pop with default None to avoid KeyError

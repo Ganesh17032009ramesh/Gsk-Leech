@@ -1,4 +1,6 @@
+import inspect
 from importlib import import_module
+from time import time as get_time
 
 from aiofiles import open as aiopen
 from aiofiles.os import path as aiopath
@@ -10,6 +12,11 @@ from bot import LOGGER, qbit_options, rss_dict, user_data
 from bot.core.aeon_client import TgClient
 from bot.core.config_manager import Config
 
+try:
+    from bot.helper.ext_utils.gc_utils import smart_garbage_collection
+except ImportError:
+    smart_garbage_collection = None
+
 
 class DbManager:
     def __init__(self):
@@ -20,13 +27,22 @@ class DbManager:
     async def connect(self):
         try:
             if self._conn is not None:
-                await self._conn.close()
+                try:
+                    await self._conn.close()
+                except Exception as e:
+                    LOGGER.error(f"Error closing previous DB connection: {e}")
             self._conn = AsyncIOMotorClient(
                 Config.DATABASE_URL,
                 server_api=ServerApi("1"),
+                maxPoolSize=10,  # Limit connection pool size
+                minPoolSize=1,
+                maxIdleTimeMS=30000,  # Close idle connections after 30 seconds
+                connectTimeoutMS=5000,  # 5 second connection timeout
+                socketTimeoutMS=10000,  # 10 second socket timeout
             )
             self.db = self._conn.luna
             self._return = False
+            LOGGER.info("Successfully connected to database")
         except PyMongoError as e:
             LOGGER.error(f"Error in DB connection: {e}")
             self.db = None
@@ -36,8 +52,17 @@ class DbManager:
     async def disconnect(self):
         self._return = True
         if self._conn is not None:
-            await self._conn.close()
+            try:
+                await self._conn.close()
+                LOGGER.info("Database connection closed successfully")
+            except Exception as e:
+                LOGGER.error(f"Error closing database connection: {e}")
         self._conn = None
+        self.db = None
+
+        # Force garbage collection after database operations
+        if smart_garbage_collection is not None:
+            smart_garbage_collection(aggressive=True)
 
     async def update_deploy_config(self):
         if self._return:
@@ -95,15 +120,28 @@ class DbManager:
             return
         db_path = path.replace(".", "__")
         if await aiopath.exists(path):
-            async with aiopen(path, "rb+") as pf:
-                pf_bin = await pf.read()
-            await self.db.settings.files.update_one(
-                {"_id": TgClient.ID},
-                {"$set": {db_path: pf_bin}},
-                upsert=True,
-            )
-            if path == "config.py":
-                await self.update_deploy_config()
+            try:
+                async with aiopen(path, "rb+") as pf:
+                    pf_bin = await pf.read()
+                await self.db.settings.files.update_one(
+                    {"_id": TgClient.ID},
+                    {"$set": {db_path: pf_bin}},
+                    upsert=True,
+                )
+                if path == "config.py":
+                    await self.update_deploy_config()
+
+                # Force garbage collection after handling large files
+                if (
+                    len(pf_bin) > 1024 * 1024
+                    and smart_garbage_collection is not None
+                ):  # 1MB
+                    smart_garbage_collection(aggressive=False)
+
+                # Explicitly delete large binary data
+                del pf_bin
+            except Exception as e:
+                LOGGER.error(f"Error updating private file {path}: {e}")
         else:
             await self.db.settings.files.update_one(
                 {"_id": TgClient.ID},
@@ -127,7 +165,14 @@ class DbManager:
             return
         data = user_data.get(user_id, {})
         data = data.copy()
-        for key in ("THUMBNAIL", "RCLONE_CONFIG", "TOKEN_PICKLE", "TOKEN", "TIME"):
+        for key in (
+            "THUMBNAIL",
+            "RCLONE_CONFIG",
+            "TOKEN_PICKLE",
+            "USER_COOKIES",
+            "TOKEN",
+            "TIME",
+        ):
             data.pop(key, None)
         pipeline = [
             {
@@ -147,6 +192,7 @@ class DbManager:
                                                     "THUMBNAIL",
                                                     "RCLONE_CONFIG",
                                                     "TOKEN_PICKLE",
+                                                    "USER_COOKIES",
                                                 ],
                                             ],
                                         },
@@ -226,12 +272,12 @@ class DbManager:
             return
         await self.db.pm_users[TgClient.ID].delete_one({"_id": user_id})
 
-    async def update_user_tdata(self, user_id, token, time):
+    async def update_user_tdata(self, user_id, token, expiry_time):
         if self._return:
             return
         await self.db.access_token.update_one(
             {"_id": user_id},
-            {"$set": {"TOKEN": token, "TIME": time}},
+            {"$set": {"TOKEN": token, "TIME": expiry_time}},
             upsert=True,
         )
 
@@ -296,6 +342,168 @@ class DbManager:
         if self._return:
             return
         await self.db[name][TgClient.ID].drop()
+
+    async def store_scheduled_deletion(
+        self,
+        chat_ids,
+        message_ids,
+        delete_time,
+        bot_id=None,
+    ):
+        """Store messages for scheduled deletion
+
+        Args:
+            chat_ids: List of chat IDs
+            message_ids: List of message IDs
+            delete_time: Timestamp when the message should be deleted
+            bot_id: ID of the bot that created the message (default: main bot ID)
+        """
+        if self.db is None:
+            return
+
+        # Default to main bot ID if not specified
+        if bot_id is None:
+            bot_id = TgClient.ID
+
+        # Storing messages for deletion
+
+        # Store each message individually to avoid bulk write issues
+        for chat_id, message_id in zip(chat_ids, message_ids, strict=True):
+            try:
+                await self.db.scheduled_deletions.update_one(
+                    {"chat_id": chat_id, "message_id": message_id},
+                    {"$set": {"delete_time": delete_time, "bot_id": bot_id}},
+                    upsert=True,
+                )
+            except Exception as e:
+                LOGGER.error(f"Error storing scheduled deletion: {e}")
+
+        # Messages stored for deletion
+
+    async def remove_scheduled_deletion(self, chat_id, message_id):
+        """Remove a message from scheduled deletions"""
+        if self.db is None:
+            return
+        await self.db.scheduled_deletions.delete_one(
+            {"chat_id": chat_id, "message_id": message_id},
+        )
+
+    async def get_pending_deletions(self):
+        """Get messages that are due for deletion"""
+        if self.db is None:
+            return []
+
+        current_time = int(get_time())
+        # Get current time for comparison
+
+        # Create index for better performance if it doesn't exist
+        await self.db.scheduled_deletions.create_index([("delete_time", 1)])
+
+        # Get all documents for manual processing
+        all_docs = [doc async for doc in self.db.scheduled_deletions.find()]
+
+        # Process documents manually to ensure we catch all due messages
+        # Include a buffer of 30 seconds to catch messages that are almost due
+        buffer_time = 30  # 30 seconds buffer
+
+        # Use list comprehension for better performance and return directly
+        # Messages found for deletion
+        return [
+            (doc["chat_id"], doc["message_id"], doc.get("bot_id", TgClient.ID))
+            for doc in all_docs
+            if doc.get("delete_time", 0) <= current_time + buffer_time
+        ]
+
+    async def clean_old_scheduled_deletions(self, days=1):
+        """Clean up scheduled deletion entries that have been processed but not removed
+
+        Args:
+            days: Number of days after which to clean up entries (default: 1)
+        """
+        if self.db is None:
+            return 0
+
+        # Calculate the timestamp for 'days' ago
+        one_day_ago = int(get_time() - (days * 86400))  # 86400 seconds = 1 day
+
+        # Cleaning up old scheduled deletion entries
+
+        # Get all entries to check which ones are actually old and processed
+        entries_to_check = [
+            doc async for doc in self.db.scheduled_deletions.find({})
+        ]
+
+        # Count entries by type
+        current_time = int(get_time())
+        past_due = [
+            doc for doc in entries_to_check if doc["delete_time"] < current_time
+        ]
+
+        # Only delete entries that are more than 'days' old AND have already been processed
+        # (i.e., their delete_time is in the past)
+        deleted_count = 0
+        for doc in past_due:
+            # If the entry is more than 'days' old from its scheduled deletion time
+            if doc["delete_time"] < one_day_ago:
+                result = await self.db.scheduled_deletions.delete_one(
+                    {"_id": doc["_id"]},
+                )
+                if result.deleted_count > 0:
+                    deleted_count += 1
+
+        # No need to log cleanup results
+
+        return deleted_count
+
+    async def get_all_scheduled_deletions(self):
+        """Get all scheduled deletions for debugging purposes"""
+        if self.db is None:
+            return []
+
+        cursor = self.db.scheduled_deletions.find({})
+        current_time = int(get_time())
+
+        # Return all scheduled deletions
+        result = [
+            {
+                "chat_id": doc["chat_id"],
+                "message_id": doc["message_id"],
+                "delete_time": doc["delete_time"],
+                "bot_id": doc.get("bot_id", TgClient.ID),
+                "time_remaining": doc["delete_time"] - current_time
+                if "delete_time" in doc
+                else "unknown",
+                "is_due": doc["delete_time"]
+                <= current_time + 30  # 30 seconds buffer
+                if "delete_time" in doc
+                else False,
+            }
+            async for doc in cursor
+        ]
+
+        # Only log detailed information when called from check_deletion.py
+        caller_frame = inspect.currentframe().f_back
+        caller_name = caller_frame.f_code.co_name if caller_frame else "unknown"
+
+        if "check_deletion" in caller_name:
+            LOGGER.info(f"Found {len(result)} total scheduled deletions in database")
+            if result:
+                pending_count = sum(1 for item in result if item["is_due"])
+                future_count = sum(1 for item in result if not item["is_due"])
+
+                LOGGER.info(
+                    f"Pending deletions: {pending_count}, Future deletions: {future_count}",
+                )
+
+                # Log some sample entries
+                if result:
+                    sample = result[:5] if len(result) > 5 else result
+                    for entry in sample:
+                        LOGGER.info(
+                            f"Sample entry: {entry} - Due for deletion: {entry['is_due']}",
+                        )
+
+        return result
 
 
 database = DbManager()

@@ -1,5 +1,5 @@
 import contextlib
-from asyncio import sleep
+from asyncio import create_task, sleep
 from time import time
 
 from aiofiles.os import path as aiopath
@@ -15,6 +15,7 @@ from bot.helper.ext_utils.status_utils import get_task_by_gid
 from bot.helper.ext_utils.task_manager import stop_duplicate_check
 from bot.helper.mirror_leech_utils.status_utils.aria2_status import Aria2Status
 from bot.helper.telegram_helper.message_utils import (
+    auto_delete_message,
     delete_message,
     send_message,
     update_status_message,
@@ -181,7 +182,16 @@ async def _on_download_error(api, data):
     if options.get("follow-torrent", "") == "false":
         return
     if task := await get_task_by_gid(gid):
-        await task.listener.on_download_error(error)
+        try:
+            await task.listener.on_download_error(error)
+        except Exception as e:
+            LOGGER.error(f"Failed to handle aria2 error through listener: {e!s}")
+            # Fallback error handling
+            error_msg = await send_message(
+                task.listener.message,
+                f"{task.listener.tag} Download Error: {error}",
+            )
+            create_task(auto_delete_message(error_msg, time=300))  # noqa: RUF006
 
 
 def add_aria2_callbacks():

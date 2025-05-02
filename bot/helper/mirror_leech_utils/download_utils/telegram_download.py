@@ -1,4 +1,4 @@
-from asyncio import Lock, sleep
+from asyncio import Lock, create_task, sleep
 from secrets import token_hex
 from time import time
 
@@ -12,7 +12,11 @@ from bot.helper.ext_utils.task_manager import (
 )
 from bot.helper.mirror_leech_utils.status_utils.queue_status import QueueStatus
 from bot.helper.mirror_leech_utils.status_utils.telegram_status import TelegramStatus
-from bot.helper.telegram_helper.message_utils import send_status_message
+from bot.helper.telegram_helper.message_utils import (
+    auto_delete_message,
+    send_message,
+    send_status_message,
+)
 
 global_lock = Lock()
 GLOBAL_GID = set()
@@ -64,12 +68,25 @@ class TelegramDownloadHelper:
         async with global_lock:
             if self._id in GLOBAL_GID:
                 GLOBAL_GID.remove(self._id)
-        await self._listener.on_download_error(error)
+        try:
+            await self._listener.on_download_error(error)
+        except Exception as e:
+            LOGGER.error(f"Failed to handle error through listener: {e!s}")
+            # Fallback error handling
+            error_msg = await send_message(
+                self._listener.message,
+                f"{self._listener.tag} {error}",
+            )
+            create_task(auto_delete_message(error_msg, time=300))  # noqa: RUF006
 
     async def _on_download_complete(self):
         await self._listener.on_download_complete()
         async with global_lock:
-            GLOBAL_GID.remove(self._id)
+            # Safely remove ID from GLOBAL_GID if it exists
+            if self._id in GLOBAL_GID:
+                GLOBAL_GID.remove(self._id)
+            else:
+                pass
 
     async def _download(self, message, path):
         try:
@@ -80,7 +97,6 @@ class TelegramDownloadHelper:
             if self._listener.is_cancelled:
                 return
         except (FloodWait, FloodPremiumWait) as f:
-            LOGGER.warning(str(f))
             await sleep(f.value)
             await self._download(message, path)
             return
@@ -97,10 +113,23 @@ class TelegramDownloadHelper:
     async def add_download(self, message, path, session):
         self.session = session
         if self.session != TgClient.bot:
-            message = await self.session.get_messages(
-                chat_id=message.chat.id,
-                message_ids=message.id,
-            )
+            # Get the message by its ID with Electrogram compatibility
+            try:
+                message = await self.session.get_messages(
+                    chat_id=message.chat.id,
+                    message_ids=message.id,
+                )
+            except TypeError as e:
+                # Handle case where get_messages has different parameters in Electrogram
+                if "unexpected keyword argument" in str(
+                    e
+                ):  # Try alternative approach for Electrogram
+                    message = await self.session.get_messages(
+                        message.chat.id,  # chat_id as positional argument
+                        message.id,  # message_ids as positional argument
+                    )
+                else:
+                    raise
 
         media = (
             message.document
@@ -153,9 +182,14 @@ class TelegramDownloadHelper:
                     await event.wait()
                     if self._listener.is_cancelled:
                         async with global_lock:
+                            # Safely remove ID from GLOBAL_GID if it exists
                             if self._id in GLOBAL_GID:
                                 GLOBAL_GID.remove(self._id)
-                        return
+                            elif self._id:  # Only log if _id is not empty
+                                LOGGER.debug(
+                                    f"ID {self._id} not found in GLOBAL_GID"
+                                )
+                            return
 
                 self._start_time = time()
                 await self._on_download_start(gid, add_to_queue)

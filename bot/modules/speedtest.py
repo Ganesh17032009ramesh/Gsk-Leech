@@ -13,6 +13,9 @@ from bot.helper.telegram_helper.message_utils import (
 
 @new_task
 async def speedtest(_, message):
+    # Delete the /speedtest command message immediately
+    await delete_message(message)
+
     speed = await send_message(message, "Initializing Speedtest...")
 
     def get_speedtest_results():

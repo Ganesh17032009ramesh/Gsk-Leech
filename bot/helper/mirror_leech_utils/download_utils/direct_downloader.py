@@ -1,6 +1,12 @@
+import gc
 from secrets import token_hex
 
 from bot import LOGGER, task_dict, task_dict_lock
+
+try:
+    from bot.helper.ext_utils.gc_utils import smart_garbage_collection
+except ImportError:
+    smart_garbage_collection = None
 from bot.helper.ext_utils.task_manager import (
     check_running_tasks,
     stop_duplicate_check,
@@ -57,3 +63,12 @@ async def add_direct_download(listener, path):
             await send_status_message(listener.message)
 
     await directListener.download(contents)
+
+    # Force garbage collection after direct download
+    # Direct downloads can create large objects in memory
+    if smart_garbage_collection:
+        smart_garbage_collection(
+            aggressive=True
+        )  # Use aggressive mode for direct downloads
+    else:
+        gc.collect()

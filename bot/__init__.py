@@ -1,5 +1,6 @@
 # ruff: noqa: E402
-from uvloop import install
+# Fix IDE issues by adding type annotations and import comments
+from uvloop import install  # type: ignore
 
 install()
 
@@ -20,9 +21,8 @@ from logging import (
 )
 from time import time
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore
 from pytz import timezone
-from uvloop import install
 
 from sabnzbdapi import SabnzbdClient
 
@@ -32,6 +32,7 @@ getLogger("pyrogram").setLevel(ERROR)
 getLogger("httpx").setLevel(WARNING)
 getLogger("pymongo").setLevel(WARNING)
 getLogger("aiohttp").setLevel(WARNING)
+getLogger("bot.modules.music_search").setLevel(ERROR)
 
 bot_start_time = time()
 
@@ -40,7 +41,7 @@ set_event_loop(bot_loop)
 
 
 class CustomFormatter(Formatter):
-    def formatTime(  # noqa: N802
+    def formatTime(
         self,
         record: LogRecord,
         datefmt: str | None,
@@ -110,29 +111,79 @@ nzb_listener_lock = Lock()
 jd_listener_lock = Lock()
 shorteners_list = []
 
-sabnzbd_client = SabnzbdClient(
-    host="http://localhost",
-    api_key="mltb",
-    port="8070",
-)
-subprocess.run(["xnox", "-d", f"--profile={os.getcwd()}"], check=False)
-subprocess.run(
-    [
-        "xnzb",
-        "-f",
-        "sabnzbd/SABnzbd.ini",
-        "-s",
-        ":::8070",
-        "-b",
-        "0",
-        "-d",
-        "-c",
-        "-l",
-        "0",
-        "--console",
-    ],
-    check=False,
-)
+# Initialize Sabnzbd client with proper error handling
+try:
+    sabnzbd_client = SabnzbdClient(
+        host="http://localhost",
+        api_key="admin",  # Use the same value as the password in SABnzbd.ini
+        port="8070",
+    )
+except Exception as e:
+    LOGGER.error(f"Error initializing Sabnzbd client: {e}")
+    sabnzbd_client = None
+
+# Properly manage qBittorrent startup
+try:
+    # First, try to kill any existing qBittorrent processes
+    LOGGER.info("Stopping any existing qBittorrent processes...")
+    subprocess.run(["pkill", "-f", "xnox"], check=False)
+    import time
+
+    time.sleep(2)  # Give more time for processes to terminate
+
+    # Now start qBittorrent with proper error handling
+    LOGGER.info("Starting qBittorrent...")
+    result = subprocess.run(
+        ["xnox", "-d", f"--profile={os.getcwd()}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    # Log any output from the command
+    if result.stdout:
+        LOGGER.info(f"qBittorrent startup output: {result.stdout}")
+    if result.stderr:
+        LOGGER.warning(f"qBittorrent startup error: {result.stderr}")
+
+    # Wait for qBittorrent to initialize
+    time.sleep(3)
+except Exception as e:
+    LOGGER.error(f"Error managing qBittorrent: {e}")
+
+# Start Sabnzbd with proper error handling
+try:
+    LOGGER.info("Starting Sabnzbd...")
+    result = subprocess.run(
+        [
+            "xnzb",
+            "-f",
+            "sabnzbd/SABnzbd.ini",
+            "-s",
+            ":::8070",
+            "-b",
+            "0",
+            "-d",
+            "-c",
+            "-l",
+            "0",
+            "--console",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    # Log any output from the command
+    if result.stdout:
+        LOGGER.info(f"Sabnzbd startup output: {result.stdout}")
+    if result.stderr:
+        LOGGER.warning(f"Sabnzbd startup error: {result.stderr}")
+
+    # Wait for Sabnzbd to initialize
+    time.sleep(3)
+except Exception as e:
+    LOGGER.error(f"Error starting Sabnzbd: {e}")
 
 
 scheduler = AsyncIOScheduler(event_loop=bot_loop)

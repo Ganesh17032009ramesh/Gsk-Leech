@@ -1,9 +1,13 @@
-from asyncio import sleep
+from asyncio import create_task, sleep
 
 from aiohttp.client_exceptions import ClientError
 
 from bot import LOGGER
 from bot.core.torrent_manager import TorrentManager, aria2_name
+from bot.helper.telegram_helper.message_utils import (
+    auto_delete_message,
+    send_message,
+)
 
 
 class DirectListener:
@@ -88,6 +92,15 @@ class DirectListener:
     async def cancel_task(self):
         self.listener.is_cancelled = True
         LOGGER.info(f"Cancelling Download: {self.listener.name}")
-        await self.listener.on_download_error("Download Cancelled by User!")
+        try:
+            await self.listener.on_download_error("Download Cancelled by User!")
+        except Exception as e:
+            LOGGER.error(f"Failed to handle cancel through listener: {e!s}")
+            # Fallback error handling
+            error_msg = await send_message(
+                self.listener.message,
+                f"{self.listener.tag} Download Cancelled by User!",
+            )
+            create_task(auto_delete_message(error_msg, time=300))  # noqa: RUF006
         if self.download_task:
             await TorrentManager.aria2_remove(self.download_task)

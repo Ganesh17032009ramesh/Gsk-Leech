@@ -14,6 +14,9 @@ class FFmpegStatus:
         self._obj = obj
         self._gid = gid
         self._cstatus = status
+        # Set the cstatus attribute on the listener for progress calculation
+        if hasattr(listener, "cstatus"):
+            listener.cstatus = status
         self.tool = "ffmpeg"
 
     def speed(self):
@@ -50,6 +53,14 @@ class FFmpegStatus:
             return MirrorStatus.STATUS_WATERMARK
         if self._cstatus == "E_thumb":
             return MirrorStatus.STATUS_ETHUMB
+        if self._cstatus == "Merge":
+            return MirrorStatus.STATUS_MERGE
+        if self._cstatus == "Compress":
+            return MirrorStatus.STATUS_COMPRESS
+        if self._cstatus == "Trim":
+            return MirrorStatus.STATUS_TRIM
+        if self._cstatus == "Extract":
+            return MirrorStatus.STATUS_EXTRACT
         return MirrorStatus.STATUS_FFMPEG
 
     def task(self):

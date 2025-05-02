@@ -1,9 +1,13 @@
-from asyncio import sleep
+from asyncio import create_task, sleep
 
-from bot import intervals, jd_downloads, jd_listener_lock
+from bot import LOGGER, intervals, jd_downloads, jd_listener_lock
 from bot.core.jdownloader_booter import jdownloader
 from bot.helper.ext_utils.bot_utils import new_task
 from bot.helper.ext_utils.status_utils import get_task_by_gid
+from bot.helper.telegram_helper.message_utils import (
+    auto_delete_message,
+    send_message,
+)
 
 
 @new_task
@@ -14,7 +18,16 @@ async def remove_download(gid):
         package_ids=jd_downloads[gid]["ids"],
     )
     if task := await get_task_by_gid(gid):
-        await task.listener.on_download_error("Download removed manually!")
+        try:
+            await task.listener.on_download_error("Download removed manually!")
+        except Exception as e:
+            LOGGER.error(f"Failed to handle JD error through listener: {e!s}")
+            # Fallback error handling
+            error_msg = await send_message(
+                task.listener.message,
+                f"{task.listener.tag} Download removed manually!",
+            )
+            create_task(auto_delete_message(error_msg, time=300))  # noqa: RUF006
         async with jd_listener_lock:
             del jd_downloads[gid]
 

@@ -1,5 +1,4 @@
-import contextlib
-from asyncio import create_subprocess_exec, gather
+from asyncio import create_subprocess_exec, create_task, gather
 from os import execl as osexecl
 from sys import executable
 
@@ -16,11 +15,16 @@ from bot.helper.ext_utils.bot_utils import new_task
 from bot.helper.ext_utils.db_handler import database
 from bot.helper.ext_utils.files_utils import clean_all
 from bot.helper.telegram_helper import button_build
-from bot.helper.telegram_helper.message_utils import delete_message, send_message
+from bot.helper.telegram_helper.message_utils import (
+    auto_delete_message,
+    delete_message,
+    send_message,
+)
 
 
 @new_task
 async def restart_bot(_, message):
+    await delete_message(message)  # Delete command message immediately
     buttons = button_build.ButtonMaker()
     buttons.data_button("Yes!", "botrestart confirm")
     buttons.data_button("Cancel", "botrestart cancel")
@@ -34,6 +38,8 @@ async def restart_bot(_, message):
 
 @new_task
 async def restart_sessions(_, message):
+    await delete_message(message)  # Delete command message immediately
+    await delete_message(message)  # Delete command message immediately
     buttons = button_build.ButtonMaker()
     buttons.data_button("Yes!", "sessionrestart confirm")
     buttons.data_button("Cancel", "sessionrestart cancel")
@@ -48,13 +54,14 @@ async def restart_sessions(_, message):
 async def send_incomplete_task_message(cid, msg_id, msg):
     try:
         if msg.startswith("Restarted Successfully!"):
-            await TgClient.bot.edit_message_text(
+            restart_msg = await TgClient.bot.edit_message_text(
                 chat_id=cid,
                 message_id=msg_id,
                 text=msg,
                 disable_web_page_preview=True,
             )
             await remove(".restartmsg")
+            create_task(auto_delete_message(restart_msg, time=300))  # noqa: RUF006
         else:
             await TgClient.bot.send_message(
                 chat_id=cid,
@@ -92,12 +99,16 @@ async def restart_notification():
                 await send_incomplete_task_message(cid, msg_id, msg)
 
     if await aiopath.isfile(".restartmsg"):
-        with contextlib.suppress(Exception):
-            await TgClient.bot.edit_message_text(
+        try:
+            restart_msg = await TgClient.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=msg_id,
                 text="Restarted Successfully!",
             )
+            create_task(auto_delete_message(restart_msg, time=300))  # noqa: RUF006
+        except Exception as e:
+            LOGGER.error(e)
+            create_task(auto_delete_message(restart_msg, time=300))  # noqa: RUF006
         await remove(".restartmsg")
 
 
@@ -108,13 +119,28 @@ async def confirm_restart(_, query):
     message = query.message
     await delete_message(message)
     if data[1] == "confirm":
-        reply_to = message.reply_to_message
         intervals["stopAll"] = True
-        restart_message = await send_message(reply_to, "Restarting...")
-        await delete_message(message)
+        # Use message.chat.id instead of relying on reply_to
+        restart_message = await TgClient.bot.send_message(
+            chat_id=message.chat.id,
+            text="Restarting...",
+        )
+        # Import garbage collection utilities
+        try:
+            from bot.helper.ext_utils.gc_utils import smart_garbage_collection
+
+            gc_available = True
+        except ImportError:
+            gc_available = False
+
+        # Stop Telegram clients
         await TgClient.stop()
+
+        # Shutdown scheduler
         if scheduler.running:
             scheduler.shutdown(wait=False)
+
+        # Cancel all intervals
         if qb := intervals["qb"]:
             qb.cancel()
         if jd := intervals["jd"]:
@@ -124,8 +150,18 @@ async def confirm_restart(_, query):
         if st := intervals["status"]:
             for intvl in list(st.values()):
                 intvl.cancel()
+
+        # Clean all downloads
         await clean_all()
+
+        # Close torrent managers
         await TorrentManager.close_all()
+
+        # Force garbage collection before closing other services
+        if gc_available:
+            smart_garbage_collection(
+                aggressive=True
+            )  # Use aggressive mode for cleanup before restart
         if sabnzbd_client.LOGGED_IN:
             await gather(
                 sabnzbd_client.pause_all(),
@@ -156,5 +192,3 @@ async def confirm_restart(_, query):
         async with aiopen(".restartmsg", "w") as f:
             await f.write(f"{restart_message.chat.id}\n{restart_message.id}\n")
         osexecl(executable, executable, "-m", "bot")
-    else:
-        await delete_message(message)

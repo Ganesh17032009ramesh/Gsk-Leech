@@ -15,7 +15,7 @@ class BotCommands:
     NzbLeechCommand = [f"nzbleech{i}", f"nl{i}"]
     YtdlLeechCommand = [f"ytdlleech{i}", f"yl{i}"]
     CloneCommand = f"clone{i}"
-    MediaInfoCommand = f"mediainfo{i}"
+    MediaInfoCommand = [f"mediainfo{i}", f"mi{i}"]
     CountCommand = f"count{i}"
     DeleteCommand = f"del{i}"
     CancelAllCommand = f"cancelall{i}"
@@ -23,7 +23,7 @@ class BotCommands:
     ListCommand = f"list{i}"
     SearchCommand = f"search{i}"
     HydraSearchCommamd = f"nzbsearch{i}"
-    StatusCommand = [f"status{i}", "statusall"]
+    StatusCommand = [f"status{i}", f"s{i}", "statusall", "sall"]
     UsersCommand = f"users{i}"
     AuthorizeCommand = f"auth{i}"
     UnAuthorizeCommand = f"unauth{i}"
@@ -40,8 +40,18 @@ class BotCommands:
     ExecCommand = f"exec{i}"
     ClearLocalsCommand = f"clearlocals{i}"
     BotSetCommand = f"botsettings{i}"
-    UserSetCommand = f"settings{i}"
+    UserSetCommand = [f"settings{i}", f"usettings{i}", f"us{i}"]
     SpeedTest = f"speedtest{i}"
     BroadcastCommand = [f"broadcast{i}", "broadcastall"]
     SelectCommand = f"sel{i}"
     RssCommand = f"rss{i}"
+    FontStylesCommand = [f"fontstyles{i}", f"fonts{i}"]
+    CheckDeletionsCommand = [f"check_deletions{i}", f"cd{i}"]
+    IMDBCommand = f"imdb{i}"
+    LoginCommand = f"login{i}"
+    MusicSearchCommand = [f"musicsearch{i}", f"ms{i}"]
+    MediaToolsCommand = [f"mediatools{i}", f"mt{i}"]
+    MediaToolsHelpCommand = [f"mthelp{i}", f"mth{i}"]
+    GenSessionCommand = [f"gensession{i}", f"gs{i}"]
+    TruecallerCommand = f"truecaller{i}"
+    AskCommand = f"ask{i}"

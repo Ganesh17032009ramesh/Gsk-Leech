@@ -1,5 +1,6 @@
+from asyncio import create_task
 from html import escape
-from time import time
+from time import monotonic, time
 from uuid import uuid4
 
 from aiofiles import open as aiopen
@@ -7,7 +8,7 @@ from aiofiles import open as aiopen
 from bot import LOGGER, user_data
 from bot.core.aeon_client import TgClient
 from bot.core.config_manager import Config
-from bot.helper.ext_utils.bot_utils import new_task
+from bot.helper.ext_utils.bot_utils import new_task, update_user_ldata
 from bot.helper.ext_utils.db_handler import database
 from bot.helper.ext_utils.status_utils import get_readable_time
 from bot.helper.telegram_helper.bot_commands import BotCommands
@@ -26,25 +27,50 @@ from bot.helper.telegram_helper.message_utils import (
 async def start(client, message):
     if len(message.command) > 1 and message.command[1] == "private":
         await delete_message(message)
-    elif len(message.command) > 1 and len(message.command[1]) == 36:
+    elif len(message.command) > 1 and message.command[1] == "gensession":
+        # Redirect to session generation
+        from bot.modules.gen_session import handle_command
+
+        await handle_command(client, message)
+    elif len(message.command) > 1 and message.command[1] != "start":
         userid = message.from_user.id
-        input_token = message.command[1]
-        stored_token = await database.get_user_token(userid)
-        if stored_token is None:
-            return await send_message(
-                message,
-                "<b>This token is not for you!</b>\n\nPlease generate your own.",
-            )
-        if input_token != stored_token:
-            return await send_message(
-                message,
-                "Invalid token.\n\nPlease generate a new one.",
-            )
-        if userid not in user_data:
-            return await send_message(
-                message,
-                "This token is not yours!\n\nKindly generate your own.",
-            )
+        if len(message.command[1]) == 36:
+            input_token = message.command[1]
+            stored_token = await database.get_user_token(userid)
+            if stored_token is None:
+                return await send_message(
+                    message,
+                    "<b>This token is not for you!</b>\n\nPlease generate your own.",
+                )
+            if input_token != stored_token:
+                return await send_message(
+                    message,
+                    "Invalid token.\n\nPlease generate a new one.",
+                )
+            if userid not in user_data:
+                return await send_message(
+                    message,
+                    "This token is not yours!\n\nKindly generate your own.",
+                )
+        else:
+            from bot.helper.ext_utils.bot_utils import decode_slink
+
+            try:
+                decrypted_url = decode_slink(message.command[1])
+                if Config.MEDIA_STORE and decrypted_url.startswith("file"):
+                    decrypted_url = decrypted_url.replace("file", "")
+                    chat_id, msg_id = decrypted_url.split("&&")
+                    LOGGER.info(
+                        f"Copying message from {chat_id} & {msg_id} to {userid}",
+                    )
+                    return await TgClient.bot.copy_message(
+                        chat_id=userid,
+                        from_chat_id=int(chat_id) if chat_id.isdigit() else chat_id,
+                        message_id=int(msg_id),
+                        disable_notification=True,
+                    )
+            except Exception as e:
+                LOGGER.error(f"Error in start command: {e}")
         data = user_data[userid]
         if "TOKEN" not in data or data["TOKEN"] != input_token:
             return await send_message(
@@ -66,16 +92,65 @@ async def start(client, message):
         await send_message(message, start_string)
     else:
         await send_message(message, "You are not a authorized user!")
-    await database.update_pm_users(message.from_user.id)
+
+    # Safely update PM users database
+    if message.from_user and hasattr(message.from_user, "id"):
+        await database.update_pm_users(message.from_user.id)
+    else:
+        pass
     return None
 
 
 @new_task
+async def login(_, message):
+    # Get login password from Config class (this is set when using bot settings)
+    login_pass = Config.LOGIN_PASS
+
+    if not login_pass:
+        return await send_message(
+            message,
+            "<i>Login is not enabled! Please set a password using bot settings first.</i>",
+        )
+
+    if len(message.command) > 1:
+        user_id = message.from_user.id
+        input_pass = message.command[1]
+
+        if user_data.get(user_id, {}).get("VERIFY_TOKEN", "") == login_pass:
+            return await send_message(
+                message,
+                "<b>Already Bot Login In!</b>\n\n<i>No Need to Login Again</i>",
+            )
+
+        if input_pass.casefold() != login_pass.casefold():
+            return await send_message(
+                message,
+                "<b>Wrong Password!</b>\n\n<i>Kindly check and try again</i>",
+            )
+
+        update_user_ldata(user_id, "VERIFY_TOKEN", login_pass)
+        if Config.DATABASE_URL:
+            await database.update_user_data(user_id)
+        return await send_message(
+            message,
+            "<b>Bot Permanent Logged In!</b>\n\n<i>Now you can use the bot</i>",
+        )
+
+    return await send_message(
+        message,
+        "<b>Bot Login Usage:</b>\n\n<code>/login [password]</code>",
+    )
+
+
+@new_task
 async def ping(_, message):
-    start_time = round(time() * 1000)
-    reply = await send_message(message, "Starting Ping")
-    end_time = round(time() * 1000)
-    await edit_message(reply, f"{end_time - start_time} ms")
+    start_time = monotonic()
+    reply = await send_message(message, "<i>Starting Ping..</i>")
+    end_time = monotonic()
+    await edit_message(
+        reply,
+        f"<i>Pong!</i>\n <code>{int((end_time - start_time) * 1000)} ms</code>",
+    )
 
 
 @new_task
@@ -88,7 +163,7 @@ async def log(_, message):
         buttons=buttons.build_menu(1),
     )
     await delete_message(message)
-    await auto_delete_message(reply_message, time=300)
+    create_task(auto_delete_message(reply_message, time=300))  # noqa: RUF006
 
 
 @new_task
@@ -127,7 +202,7 @@ async def aeon_callback(_, query):
             )
             await query.edit_message_reply_markup(None)
             await delete_message(message)
-            await auto_delete_message(reply_message, time=300)
+            create_task(auto_delete_message(reply_message, time=300))  # noqa: RUF006
         except Exception as err:
             LOGGER.error(f"TG Log Display : {err!s}")
     elif data[2] == "private":

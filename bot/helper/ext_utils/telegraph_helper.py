@@ -2,7 +2,7 @@ from asyncio import sleep
 from secrets import token_hex
 
 from telegraph.aio import Telegraph
-from telegraph.exceptions import RetryAfterError
+from telegraph.exceptions import RetryAfterError, TelegraphException
 
 from bot import LOGGER
 
@@ -33,11 +33,29 @@ class TelegraphHelper:
                 html_content=content,
             )
         except RetryAfterError as st:
-            LOGGER.warning(
-                f"Telegraph Flood control exceeded. I will sleep for {st.retry_after} seconds.",
-            )
             await sleep(st.retry_after)
             return await self.create_page(title, content)
+        except TelegraphException as e:
+            if str(e) == "CONTENT_TOO_BIG":
+                # Split the content in half and try again
+                if isinstance(content, str):
+                    # If it's a string, split it by paragraphs or lines
+                    if "<br>" in content:
+                        parts = content.split("<br>", 1)
+                    else:
+                        # Split roughly in the middle
+                        mid = len(content) // 2
+                        parts = [content[:mid], content[mid:]]
+
+                    if len(parts) > 1:
+                        # Create first page with first half
+                        return await self.create_page(title, parts[0])
+                    LOGGER.error(f"Cannot split content: {e}")
+                    raise
+                LOGGER.error(f"Content is not a string, cannot split: {e}")
+                raise
+            LOGGER.error(f"Telegraph error: {e}")
+            raise
 
     async def edit_page(self, path, title, content):
         try:
@@ -49,9 +67,6 @@ class TelegraphHelper:
                 html_content=content,
             )
         except RetryAfterError as st:
-            LOGGER.warning(
-                f"Telegraph Flood control exceeded. I will sleep for {st.retry_after} seconds.",
-            )
             await sleep(st.retry_after)
             return await self.edit_page(path, title, content)
 
@@ -83,5 +98,3 @@ telegraph = TelegraphHelper(
     "Mirror-Leech-Telegram-Bot",
     "https://github.com/anasty17/mirror-leech-telegram-bot",
 )
-
-print(__name__)

@@ -6,6 +6,7 @@ from time import time
 from psutil import cpu_percent, disk_usage, virtual_memory
 
 from bot import DOWNLOAD_DIR, bot_start_time, status_dict, task_dict, task_dict_lock
+from bot.core.config_manager import Config
 from bot.helper.telegram_helper.button_build import ButtonMaker
 
 SIZE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"]
@@ -29,6 +30,9 @@ class MirrorStatus:
     STATUS_METADATA = "Metadata"
     STATUS_WATERMARK = "Watermark"
     STATUS_ETHUMB = "Embed Thumb"
+    STATUS_MERGE = "Merging"
+    STATUS_COMPRESS = "Compress"
+    STATUS_TRIM = "Trim"
 
 
 STATUSES = {
@@ -47,6 +51,8 @@ STATUSES = {
     "FF": MirrorStatus.STATUS_FFMPEG,
     "PA": MirrorStatus.STATUS_PAUSED,
     "CK": MirrorStatus.STATUS_CHECK,
+    "CP": MirrorStatus.STATUS_COMPRESS,
+    "TR": MirrorStatus.STATUS_TRIM,
 }
 
 
@@ -150,8 +156,15 @@ def time_to_seconds(time_duration):
         return 0
 
 
-def speed_string_to_bytes(size_text: str):
+def speed_string_to_bytes(size_text):
     size = 0
+    if isinstance(size_text, int):
+        return size_text
+    if isinstance(size_text, float):
+        return size_text
+    if not isinstance(size_text, str):
+        return 0
+
     size_text = size_text.lower()
     if "k" in size_text:
         size += float(size_text.split("k")[0]) * 1024
@@ -190,7 +203,7 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
 
     tasks = await get_specific_tasks(status, sid if is_user else None)
 
-    STATUS_LIMIT = 4
+    STATUS_LIMIT = 5
     tasks_no = len(tasks)
     pages = (max(tasks_no, 1) + STATUS_LIMIT - 1) // STATUS_LIMIT
     if page_no > pages:
@@ -215,20 +228,28 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
             msg += f"<b>{index + start_position}. <a href='{task.listener.message.link}'>{tstatus}</a>: </b>"
         else:
             msg += f"<b>{index + start_position}. {tstatus}: </b>"
-        msg += f"<code>{escape(f'{task.name()}')}</code>"
+        msg += f"[<code>{escape(f'{task.name()}')}</code>]"
         if task.listener.subname:
             msg += f"\n<i>{task.listener.subname}</i>"
-        msg += f"\nby: {source(task.listener)}"
+        msg += f"\nby <b>{source(task.listener)}</b>"
         if (
             tstatus not in [MirrorStatus.STATUS_SEED, MirrorStatus.STATUS_QUEUEUP]
             and task.listener.progress
         ):
             progress = task.progress()
-            msg += f"\n{get_progress_bar_string(progress)} {progress}"
+            msg += f"\n<blockquote>{get_progress_bar_string(progress)} {progress}"
             if task.listener.subname:
                 subsize = f"/{get_readable_file_size(task.listener.subsize)}"
-                ac = len(task.listener.files_to_proceed)
-                count = f"{task.listener.proceed_count}/{ac or '?'}"
+                # Check if files_to_proceed exists and has items
+                if (
+                    hasattr(task.listener, "files_to_proceed")
+                    and task.listener.files_to_proceed
+                ):
+                    ac = len(task.listener.files_to_proceed)
+                    count = f"{task.listener.proceed_count}/{ac}"
+                else:
+                    # If no files_to_proceed or it's empty, just show the proceed_count
+                    count = f"{task.listener.proceed_count}"
             else:
                 subsize = ""
                 count = ""
@@ -244,17 +265,18 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
                 with contextlib.suppress(Exception):
                     msg += f"\n<b>Seeders:</b> {task.seeders_num()} | <b>Leechers:</b> {task.leechers_num()}"
         elif tstatus == MirrorStatus.STATUS_SEED:
-            msg += f"\n<b>Size: </b>{task.size()}"
+            msg += f"\n<blockquote><b>Size: </b>{task.size()}"
             msg += f"\n<b>Speed: </b>{task.seed_speed()}"
             msg += f"\n<b>Uploaded: </b>{task.uploaded_bytes()}"
             msg += f"\n<b>Ratio: </b>{task.ratio()}"
             msg += f" | <b>Time: </b>{task.seeding_time()}"
         else:
-            msg += f"\n<b>Size: </b>{task.size()}"
+            msg += f"\n<blockquote><b>Size: </b>{task.size()}"
         msg += f"\n<b>Tool:</b> {task.tool}"
+        msg += f"\n<b>Elapsed: </b>{get_readable_time(time() - task.listener.message.date.timestamp())}</blockquote>"
         task_gid = task.gid()
         short_gid = task_gid[-8:] if task_gid.startswith("SABnzbd") else task_gid[:8]
-        msg += f"\n/stop_{short_gid}\n\n"
+        msg += f"\n<blockquote>/stop_{short_gid}</blockquote>\n\n"
 
     if len(msg) == 0:
         if status == "All":
@@ -277,4 +299,14 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
     button = buttons.build_menu(8)
     msg += f"<b>CPU:</b> {cpu_percent()}% | <b>FREE:</b> {get_readable_file_size(disk_usage(DOWNLOAD_DIR).free)}"
     msg += f"\n<b>RAM:</b> {virtual_memory().percent}% | <b>UPTIME:</b> {get_readable_time(time() - bot_start_time)}"
+
+    # Add restart time if enabled
+    if Config.AUTO_RESTART_ENABLED:
+        # Import here to avoid circular imports
+        from bot.helper.ext_utils.auto_restart import get_restart_time_remaining
+
+        restart_time = get_restart_time_remaining()
+        if restart_time:
+            msg += f"\n<b>NEXT RESTART:</b> {restart_time}"
+
     return msg, button

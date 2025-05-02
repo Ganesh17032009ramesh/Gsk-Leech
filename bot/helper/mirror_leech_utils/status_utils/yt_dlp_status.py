@@ -37,6 +37,25 @@ class YtDlpStatus:
         if self._obj.eta != "-":
             return get_readable_time(self._obj.eta)
         try:
+            # Check if download is stalled (zero speed or no progress)
+            if self._obj.download_speed == 0:
+                return "∞"  # Infinity symbol for stalled download
+
+            # Check if speed is too slow (less than 50 KB/s)
+            if self._obj.download_speed < 50 * 1024:
+                # Calculate ETA
+                seconds = (
+                    self._obj.size - self._obj.downloaded_bytes
+                ) / self._obj.download_speed
+
+                # If ETA is more than 4 hours for slow download, mark it
+                if seconds > 4 * 60 * 60:
+                    return "⚠️ >4h"  # Warning symbol for very long ETA
+                # If ETA is more than 24 hours, mark it differently
+                if seconds > 24 * 60 * 60:
+                    return "⚠️ >24h"  # Warning symbol for extremely long ETA
+
+            # Calculate ETA based on remaining bytes and current speed
             seconds = (
                 self._obj.size - self._obj.downloaded_bytes
             ) / self._obj.download_speed

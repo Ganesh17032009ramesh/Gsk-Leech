@@ -1,5 +1,5 @@
 import contextlib
-from asyncio import sleep
+from asyncio import create_task, sleep
 from time import time
 
 from aiofiles.os import path as aiopath
@@ -21,7 +21,11 @@ from bot.helper.ext_utils.files_utils import clean_unwanted
 from bot.helper.ext_utils.status_utils import get_readable_time, get_task_by_gid
 from bot.helper.ext_utils.task_manager import stop_duplicate_check
 from bot.helper.mirror_leech_utils.status_utils.qbit_status import QbittorrentStatus
-from bot.helper.telegram_helper.message_utils import update_status_message
+from bot.helper.telegram_helper.message_utils import (
+    auto_delete_message,
+    send_message,
+    update_status_message,
+)
 
 
 async def _remove_torrent(hash_, tag):
@@ -37,7 +41,16 @@ async def _on_download_error(err, tor, button=None):
     LOGGER.info(f"Cancelling Download: {tor.name}")
     ext_hash = tor.hash
     if task := await get_task_by_gid(ext_hash[:12]):
-        await task.listener.on_download_error(err, button)
+        try:
+            await task.listener.on_download_error(err, button)
+        except Exception as e:
+            LOGGER.error(f"Failed to handle qBit error through listener: {e!s}")
+            # Fallback error handling
+            error_msg = await send_message(
+                task.listener.message,
+                f"{task.listener.tag} Download Error: {err}",
+            )
+            create_task(auto_delete_message(error_msg, time=300))  # noqa: RUF006
     await TorrentManager.qbittorrent.torrents.stop([ext_hash])
     await sleep(0.3)
     await _remove_torrent(ext_hash, tor.tags[0])
@@ -55,15 +68,15 @@ async def _on_seed_finish(tor):
 
 @new_task
 async def _stop_duplicate(tor):
-    if task := await get_task_by_gid(tor.hash[:12]):
-        if task.listener.stop_duplicate:
-            task.listener.name = tor.content_path.rsplit("/", 1)[-1].rsplit(
-                ".!qB",
-                1,
-            )[0]
-            msg, button = await stop_duplicate_check(task.listener)
-            if msg:
-                _on_download_error(msg, tor, button)
+    task = await get_task_by_gid(tor.hash[:12])
+    if task and task.listener.stop_duplicate:
+        task.listener.name = tor.content_path.rsplit("/", 1)[-1].rsplit(
+            ".!qB",
+            1,
+        )[0]
+        msg, button = await stop_duplicate_check(task.listener)
+        if msg:
+            _on_download_error(msg, tor, button)
 
 
 @new_task
@@ -149,7 +162,6 @@ async def _qb_listener():
                             msg = f"Force recheck - Name: {tor_info.name} Hash: "
                             msg += f"{tor_info.hash} Downloaded Bytes: {tor_info.downloaded} "
                             msg += f"Size: {tor_info.size} Total Size: {tor_info.total_size}"
-                            LOGGER.warning(msg)
                             await TorrentManager.qbittorrent.torrents.recheck(
                                 [tor_info.hash],
                             )

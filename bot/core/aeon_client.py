@@ -35,7 +35,12 @@ class TgClient:
 
     @classmethod
     async def start_user(cls):
-        if Config.USER_SESSION_STRING:
+        # Check if USER_SESSION_STRING is a valid string with content
+        if (
+            Config.USER_SESSION_STRING
+            and isinstance(Config.USER_SESSION_STRING, str)
+            and len(Config.USER_SESSION_STRING) > 0
+        ):
             LOGGER.info("Creating client from USER_SESSION_STRING")
             try:
                 cls.user = Client(
@@ -56,6 +61,11 @@ class TgClient:
                 LOGGER.error(f"Failed to start client from USER_SESSION_STRING. {e}")
                 cls.IS_PREMIUM_USER = False
                 cls.user = None
+        elif Config.USER_SESSION_STRING and not isinstance(
+            Config.USER_SESSION_STRING, str
+        ):
+            cls.IS_PREMIUM_USER = False
+            cls.user = None
 
     @classmethod
     async def stop(cls):

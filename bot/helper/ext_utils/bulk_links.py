@@ -1,6 +1,8 @@
 from aiofiles import open as aiopen
 from aiofiles.os import remove
 
+from bot.helper.telegram_helper.message_utils import delete_message
+
 
 def filter_links(links_list: list, bulk_start: int, bulk_end: int) -> list:
     if bulk_start != 0 and bulk_end != 0:
@@ -31,11 +33,16 @@ async def extract_bulk_links(message, bulk_start: str, bulk_end: str) -> list:
     bulk_start = int(bulk_start)
     bulk_end = int(bulk_end)
     links_list = []
-    if reply_to := message.reply_to_message:
+    reply_to = message.reply_to_message
+    if reply_to:
         if (file_ := reply_to.document) and (file_.mime_type == "text/plain"):
             links_list = await get_links_from_file(reply_to)
         elif text := reply_to.text:
             links_list = get_links_from_message(text)
+
+        # Delete the replied message containing bulk links
+        await delete_message(reply_to)
+
     return (
         filter_links(links_list, bulk_start, bulk_end) if links_list else links_list
     )

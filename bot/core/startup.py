@@ -1,10 +1,16 @@
-from asyncio import create_subprocess_exec, create_subprocess_shell
+from asyncio import (
+    create_subprocess_exec,
+    create_subprocess_shell,
+    create_task,
+    sleep,
+)
 from os import environ
+from time import time
 
 from aiofiles import open as aiopen
 from aiofiles.os import makedirs, remove
 from aiofiles.os import path as aiopath
-from aioshutil import rmtree
+from aioshutil import rmtree  # type: ignore
 
 from bot import (
     LOGGER,
@@ -23,6 +29,7 @@ from bot import (
     user_data,
 )
 from bot.helper.ext_utils.db_handler import database
+from sabnzbdapi.exception import APIConnectionError, APIError
 
 from .aeon_client import TgClient
 from .config_manager import Config
@@ -37,9 +44,13 @@ async def update_qb_options():
         for k in list(qbit_options.keys()):
             if k.startswith("rss"):
                 del qbit_options[k]
-        qbit_options["web_ui_password"] = "mltbmltb"
+        # Set username to 'admin' and password to LOGIN_PASS (or 'admin' if not set)
+        username = "admin"
+        password = Config.LOGIN_PASS or "admin"
+        qbit_options["web_ui_username"] = username
+        qbit_options["web_ui_password"] = password
         await TorrentManager.qbittorrent.app.set_preferences(
-            {"web_ui_password": "mltbmltb"},
+            {"web_ui_username": username, "web_ui_password": password},
         )
     else:
         await TorrentManager.qbittorrent.app.set_preferences(qbit_options)
@@ -54,18 +65,71 @@ async def update_aria2_options():
 
 
 async def update_nzb_options():
-    no = (await sabnzbd_client.get_config())["config"]["misc"]
-    nzb_options.update(no)
+    try:
+        if sabnzbd_client is None:
+            LOGGER.warning(
+                "SABnzbd client is not initialized, skipping NZB options update",
+            )
+            return
+
+        # Try to connect to SABnzbd with a timeout
+        try:
+            # First check if SABnzbd is responding at all
+            status_response = await sabnzbd_client.call(
+                {"mode": "version"},
+                requests_args={"timeout": 5},
+            )
+            if not status_response:
+                LOGGER.warning(
+                    "SABnzbd is not responding, skipping NZB options update",
+                )
+                return
+        except Exception as e:
+            LOGGER.warning(
+                f"SABnzbd is not accessible: {e}, skipping NZB options update",
+            )
+            return
+
+        # Now try to get the config
+        try:
+            config_response = await sabnzbd_client.get_config()
+            if (
+                config_response
+                and isinstance(config_response, dict)
+                and "config" in config_response
+                and "misc" in config_response["config"]
+            ):
+                no = config_response["config"]["misc"]
+                nzb_options.update(no)
+                LOGGER.info("Successfully updated NZB options")
+            else:
+                pass
+        except Exception as e:
+            LOGGER.warning(
+                f"Failed to get SABnzbd config: {e}, skipping NZB options update",
+            )
+    except APIError as e:
+        LOGGER.error(f"SABnzbd API error: {e}")
+        # Continue with the bot startup even if NZB options update fails
+    except APIConnectionError as e:
+        LOGGER.error(f"SABnzbd connection error: {e}")
+        # Continue with the bot startup even if NZB options update fails
+    except Exception as e:
+        LOGGER.error(f"Error updating NZB options: {e}")
+        # Continue with the bot startup even if NZB options update fails
 
 
 async def load_settings():
     if not Config.DATABASE_URL:
         return
-    for p in ["thumbnails", "tokens", "rclone"]:
+    for p in ["thumbnails", "tokens", "rclone", "cookies"]:
         if await aiopath.exists(p):
             await rmtree(p, ignore_errors=True)
     await database.connect()
     if database.db is not None:
+        # Process any pending message deletions
+        await process_pending_deletions()
+
         BOT_ID = Config.BOT_TOKEN.split(":", 1)[0]
         current_deploy_config = Config.get_all()
         old_deploy_config = await database.db.settings.deployConfig.find_one(
@@ -137,21 +201,45 @@ async def load_settings():
         ):
             qbit_options.update(qbit_opt)
 
-        if nzb_opt := await database.db.settings.nzb.find_one(
-            {"_id": BOT_ID},
-            {"_id": 0},
-        ):
-            if await aiopath.exists("sabnzbd/SABnzbd.ini.bak"):
-                await remove("sabnzbd/SABnzbd.ini.bak")
-            ((key, value),) = nzb_opt.items()
-            file_ = key.replace("__", ".")
-            async with aiopen(f"sabnzbd/{file_}", "wb+") as f:
-                await f.write(value)
+        # Load SABnzbd config if it exists in the database
+        try:
+            if nzb_opt := await database.db.settings.nzb.find_one(
+                {"_id": BOT_ID},
+                {"_id": 0},
+            ):
+                # Make sure the sabnzbd directory exists
+                try:
+                    if not await aiopath.exists("sabnzbd"):
+                        await makedirs("sabnzbd")
+
+                    # Remove backup file if it exists
+                    if await aiopath.exists("sabnzbd/SABnzbd.ini.bak"):
+                        await remove("sabnzbd/SABnzbd.ini.bak")
+
+                    # Extract the key-value pair from the database
+                    if len(nzb_opt) > 0:
+                        ((key, value),) = nzb_opt.items()
+                        file_ = key.replace("__", ".")
+
+                        # Write the config file
+                        async with aiopen(f"sabnzbd/{file_}", "wb+") as f:
+                            await f.write(value)
+                        LOGGER.info("SABnzbd configuration loaded from database")
+                    else:
+                        LOGGER.warning("Empty SABnzbd configuration in database")
+                except Exception as e:
+                    LOGGER.warning(f"Error writing SABnzbd configuration file: {e}")
+        except Exception as e:
+            LOGGER.error(f"Error loading SABnzbd configuration from database: {e}")
 
         if await database.db.users.find_one():
-            for p in ["thumbnails", "tokens", "rclone"]:
+            for p in ["thumbnails", "tokens", "rclone", "cookies"]:
                 if not await aiopath.exists(p):
                     await makedirs(p)
+
+            # Set secure permissions for cookies directory
+            if await aiopath.exists("cookies"):
+                await create_subprocess_exec("chmod", "700", "cookies")
             rows = database.db.users.find({})
             async for row in rows:
                 uid = row["_id"]
@@ -171,6 +259,15 @@ async def load_settings():
                     async with aiopen(token_path, "wb+") as f:
                         await f.write(row["TOKEN_PICKLE"])
                     row["TOKEN_PICKLE"] = token_path
+                # Load user cookies if available
+                cookies_path = f"cookies/{uid}.txt"
+                if row.get("USER_COOKIES"):
+                    async with aiopen(cookies_path, "wb+") as f:
+                        await f.write(row["USER_COOKIES"])
+                    row["USER_COOKIES"] = cookies_path
+                    # Set secure permissions for individual cookie files
+                    await create_subprocess_exec("chmod", "600", cookies_path)
+                    # Silently load user cookies without logging
                 user_data[uid] = row
             LOGGER.info("Users data has been imported from Database")
 
@@ -200,23 +297,54 @@ async def save_settings():
         )
     if await database.db.settings.qbittorrent.find_one({"_id": TgClient.ID}) is None:
         await database.save_qbit_settings()
-    if await database.db.settings.nzb.find_one({"_id": TgClient.ID}) is None:
-        async with aiopen("sabnzbd/SABnzbd.ini", "rb+") as pf:
-            nzb_conf = await pf.read()
-        await database.db.settings.nzb.update_one(
-            {"_id": TgClient.ID},
-            {"$set": {"SABnzbd__ini": nzb_conf}},
-            upsert=True,
-        )
+    # Save SABnzbd config if it exists and hasn't been saved before
+    try:
+        if await database.db.settings.nzb.find_one({"_id": TgClient.ID}) is None:
+            try:
+                if await aiopath.exists("sabnzbd/SABnzbd.ini"):
+                    try:
+                        async with aiopen("sabnzbd/SABnzbd.ini", "rb+") as pf:
+                            nzb_conf = await pf.read()
+
+                        if nzb_conf:  # Make sure we have actual content
+                            await database.db.settings.nzb.update_one(
+                                {"_id": TgClient.ID},
+                                {"$set": {"SABnzbd__ini": nzb_conf}},
+                                upsert=True,
+                            )
+                            LOGGER.info("SABnzbd configuration saved to database")
+                        else:
+                            pass
+                    except Exception as e:
+                        LOGGER.warning(
+                            f"Error reading SABnzbd configuration file: {e}",
+                        )
+                else:
+                    LOGGER.info(
+                        "SABnzbd configuration file not found, skipping save",
+                    )
+            except Exception as e:
+                LOGGER.warning(f"Error checking SABnzbd configuration file: {e}")
+    except Exception as e:
+        LOGGER.error(f"Error saving SABnzbd configuration to database: {e}")
 
 
 async def update_variables():
+    # Calculate max split size based on owner's session only
+    max_split_size = (
+        TgClient.MAX_SPLIT_SIZE
+        if hasattr(Config, "USER_SESSION_STRING") and Config.USER_SESSION_STRING
+        else 2097152000
+    )
+
+    # Set default leech split size to max split size based on owner session premium status
+    # Only if not explicitly set by owner or if it exceeds max split size
     if (
-        Config.LEECH_SPLIT_SIZE > TgClient.MAX_SPLIT_SIZE
-        or Config.LEECH_SPLIT_SIZE == 2097152000
-        or not Config.LEECH_SPLIT_SIZE
+        not Config.LEECH_SPLIT_SIZE  # Not set
+        or max_split_size < Config.LEECH_SPLIT_SIZE  # Exceeds max allowed
+        or Config.LEECH_SPLIT_SIZE == 2097152000  # Default value, not custom
     ):
-        Config.LEECH_SPLIT_SIZE = TgClient.MAX_SPLIT_SIZE
+        Config.LEECH_SPLIT_SIZE = max_split_size
 
     Config.HYBRID_LEECH = bool(Config.HYBRID_LEECH and TgClient.IS_PREMIUM_USER)
     Config.USER_TRANSMISSION = bool(
@@ -273,7 +401,7 @@ async def load_configurations():
         )
     ).wait()
 
-    PORT = environ.get("PORT") or environ.get("BASE_URL_PORT", 80)
+    PORT = environ.get("PORT") or environ.get("BASE_URL_PORT", "80")
     await create_subprocess_shell(
         f"gunicorn -k uvicorn.workers.UvicornWorker -w 1 web.wserver:app --bind 0.0.0.0:{PORT}",
     )
@@ -311,3 +439,143 @@ async def load_configurations():
 
     if not await aiopath.exists("accounts"):
         Config.USE_SERVICE_ACCOUNTS = False
+
+
+async def process_pending_deletions():
+    """Process messages that were scheduled for deletion"""
+    if database.db is None:
+        LOGGER.info("Database is None, skipping pending deletions check")
+        return
+
+    # Check if TgClient.bot is initialized
+    if not hasattr(TgClient, "bot") or TgClient.bot is None:
+        # TgClient.bot not initialized yet, skipping pending deletions
+        return
+
+    # Check all scheduled deletions for debugging
+    await database.get_all_scheduled_deletions()
+
+    # Clean up old scheduled deletion entries once a day
+    current_time = int(time())
+    last_cleanup_time = getattr(process_pending_deletions, "last_cleanup_time", 0)
+    if current_time - last_cleanup_time > 86400:  # 86400 seconds = 1 day
+        await database.clean_old_scheduled_deletions(days=1)
+        process_pending_deletions.last_cleanup_time = current_time
+
+    pending_deletions = await database.get_pending_deletions()
+
+    if not pending_deletions:
+        return
+
+    # Process each pending deletion individually
+    success_count = 0
+    fail_count = 0
+    removed_from_db_count = 0
+
+    for chat_id, msg_id, bot_id in pending_deletions:
+        # Get the appropriate bot client
+        bot_client = None
+        if bot_id == TgClient.ID:
+            bot_client = TgClient.bot
+        elif hasattr(TgClient, "helper_bots") and bot_id in TgClient.helper_bots:
+            bot_client = TgClient.helper_bots[bot_id]
+
+        if bot_client is None:
+            # Bot not found, skipping message
+            fail_count += 1
+            continue
+
+        try:
+            # Try to get the message first to verify it exists
+            try:
+                msg = await bot_client.get_messages(
+                    chat_id=chat_id,
+                    message_ids=int(msg_id),
+                )
+
+                if msg is None or getattr(msg, "empty", False):
+                    # Message not found, removing from database
+                    await database.remove_scheduled_deletion(chat_id, msg_id)
+                    removed_from_db_count += 1
+                    continue
+
+                # Message found, will attempt to delete
+            except Exception:
+                # Error getting message, skipping
+                continue
+
+            # Make sure message_id is an integer
+            message_id_int = int(msg_id)
+            await bot_client.delete_messages(
+                chat_id=chat_id,
+                message_ids=[message_id_int],  # Pass as a list with a single item
+            )
+            # Successfully deleted the message
+            success_count += 1
+            # Remove from database after successful deletion
+            await database.remove_scheduled_deletion(chat_id, msg_id)
+            removed_from_db_count += 1
+        except Exception as e:
+            # Failed to delete message
+            fail_count += 1
+            # Check if it's a CHANNEL_INVALID or similar error
+            if (
+                "CHANNEL_INVALID" in str(e)
+                or "CHAT_INVALID" in str(e)
+                or "USER_INVALID" in str(e)
+                or "PEER_ID_INVALID" in str(e)
+            ):
+                # Chat is invalid, removing from database
+                # Remove from database since the chat is invalid
+                await database.remove_scheduled_deletion(chat_id, msg_id)
+                removed_from_db_count += 1
+
+    # Log summary
+    LOGGER.info(
+        f"Auto-deletion results: {success_count} deleted, {fail_count} failed, {removed_from_db_count} removed from database",
+    )
+
+
+async def scheduled_deletion_checker():
+    LOGGER.info("Scheduled deletion checker started")
+    while True:
+        try:
+            await process_pending_deletions()
+        except Exception as e:
+            LOGGER.error(f"Error in scheduled deletion checker: {e}")
+        await sleep(600)  # Check every 10 minutes
+
+
+async def start_bot():
+    # Only start the scheduled deletion checker after TgClient is initialized
+    if hasattr(TgClient, "bot") and TgClient.bot is not None:
+        LOGGER.info("Starting scheduled deletion checker")
+        create_task(scheduled_deletion_checker())  # noqa: RUF006
+    else:
+        LOGGER.warning(
+            "TgClient.bot not initialized, will start scheduled deletion checker when bot is ready",
+        )
+        # Create a task to wait for TgClient.bot to be initialized and then start the checker
+        create_task(wait_for_bot_and_start_checker())  # noqa: RUF006
+
+
+async def wait_for_bot_and_start_checker():
+    """Wait for TgClient.bot to be initialized and then start the scheduled deletion checker"""
+    # Check less frequently to reduce resource usage
+    # The bot initialization is a one-time event that happens during startup
+    await sleep(60)  # Initial delay to allow bot to initialize normally
+
+    # Check a few times with longer intervals
+    for _ in range(5):  # Try 5 times
+        if hasattr(TgClient, "bot") and TgClient.bot is not None:
+            LOGGER.info(
+                "TgClient.bot is now initialized, starting scheduled deletion checker",
+            )
+            create_task(scheduled_deletion_checker())  # noqa: RUF006
+            return
+        await sleep(60)  # Check every minute
+
+    # If we get here, the bot still isn't initialized after 5 minutes
+    LOGGER.warning(
+        "TgClient.bot still not initialized after 5 minutes, scheduled deletion checker not started",
+    )

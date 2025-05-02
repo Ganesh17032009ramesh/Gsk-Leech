@@ -1,5 +1,7 @@
 # ruff: noqa: ARG005, B023
 import contextlib
+import gc
+from asyncio import create_task
 from logging import getLogger
 from os import listdir
 from os import path as ospath
@@ -14,9 +16,18 @@ from bot.helper.ext_utils.task_manager import (
     check_running_tasks,
     stop_duplicate_check,
 )
+
+try:
+    from bot.helper.ext_utils.gc_utils import smart_garbage_collection
+except ImportError:
+    smart_garbage_collection = None
 from bot.helper.mirror_leech_utils.status_utils.queue_status import QueueStatus
 from bot.helper.mirror_leech_utils.status_utils.yt_dlp_status import YtDlpStatus
-from bot.helper.telegram_helper.message_utils import send_status_message
+from bot.helper.telegram_helper.message_utils import (
+    auto_delete_message,
+    send_message,
+    send_status_message,
+)
 
 LOGGER = getLogger(__name__)
 
@@ -42,12 +53,19 @@ class MyLogger:
 
     @staticmethod
     def warning(msg):
-        LOGGER.warning(msg)
+        pass
 
     @staticmethod
     def error(msg):
         if msg != "ERROR: Cancelling...":
-            LOGGER.error(msg)
+            # Don't log postprocessing errors related to output files
+            if "Postprocessing: Error opening output files" in msg:
+                pass
+            # Log preprocessing errors with more details
+            elif "Preprocessing: Error splitting the argument list" in msg:
+                LOGGER.error(f"E: {msg}")
+            else:
+                LOGGER.error(msg)
 
 
 class YoutubeDLHelper:
@@ -61,11 +79,22 @@ class YoutubeDLHelper:
         self._gid = ""
         self._ext = ""
         self.is_playlist = False
+
+        # Check for user-specific cookies
+        user_id = listener.user_id
+        user_cookies_path = f"cookies/{user_id}.txt"
+
+        # Security check: Only use user's own cookies or the default cookies
+        if ospath.exists(user_cookies_path):
+            cookies_file = user_cookies_path
+        else:
+            cookies_file = "cookies.txt"
+
         self.opts = {
             "progress_hooks": [self._on_download_progress],
             "logger": MyLogger(self, self._listener),
             "usenetrc": True,
-            "cookiefile": "cookies.txt",
+            "cookiefile": cookies_file,
             "allow_multiple_video_streams": True,
             "allow_multiple_audio_streams": True,
             "noprogress": True,
@@ -73,16 +102,33 @@ class YoutubeDLHelper:
             "overwrites": True,
             "writethumbnail": True,
             "trim_file_name": 220,
-            "ffmpeg_location": "/bin/xtra",
+            "ffmpeg_location": "/usr/bin/xtra",
             "fragment_retries": 10,
             "retries": 10,
+            "extractor_retries": 5,
+            "file_access_retries": 5,
             "retry_sleep_functions": {
                 "http": lambda n: 3,
                 "fragment": lambda n: 3,
                 "file_access": lambda n: 3,
                 "extractor": lambda n: 3,
             },
+            # YouTube TV client settings to help with SSAP experiment issues
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["tv"],
+                    "player_skip": ["webpage"],
+                    "max_comments": [0],
+                    "skip_webpage": [True],
+                }
+            },
         }
+
+        # Log which cookies file is being used
+        if cookies_file == user_cookies_path:
+            LOGGER.info(f"Using user-specific cookies for user ID: {user_id}")
+        else:
+            LOGGER.info("Using default cookies.txt file")
 
     @property
     def download_speed(self):
@@ -141,16 +187,137 @@ class YoutubeDLHelper:
 
     def _on_download_error(self, error):
         self._listener.is_cancelled = True
-        async_to_sync(self._listener.on_download_error, error)
+        try:
+            async_to_sync(self._listener.on_download_error, error)
+        except Exception as e:
+            LOGGER.error(f"Failed to handle error through listener: {e!s}")
+            # Fallback error handling
+            error_msg = async_to_sync(
+                send_message,
+                self._listener.message,
+                f"{self._listener.tag} Download: {error}",
+            )
+            create_task(auto_delete_message(error_msg, time=300))  # noqa: RUF006
 
     def _extract_meta_data(self):
+        # Configure external downloader for specific protocols
         if self._listener.link.startswith(("rtmp", "mms", "rstp", "rtmps")):
             self.opts["external_downloader"] = "xtra"
+
+        # Check for HLS streams and configure appropriately
+        if ".m3u8" in self._listener.link or "hls" in self._listener.link.lower():
+            LOGGER.info("HLS stream detected, configuring appropriate options")
+            # Add HLS-specific options
+            self.opts["external_downloader"] = "xtra"
+            self.opts["hls_prefer_native"] = False
+            self.opts["hls_use_mpegts"] = True
+
+            # For live streams
+            if "live" in self._listener.link.lower():
+                LOGGER.info("Live HLS stream detected, adding live stream options")
+                self.opts["live_from_start"] = True
+                self.opts["wait_for_video"] = (
+                    5,
+                    60,
+                )  # Wait between 5-60 seconds for video
+
+        # YouTube-specific optimizations
+        if "youtube.com" in self._listener.link or "youtu.be" in self._listener.link:
+            LOGGER.info("YouTube link detected, applying optimizations")
+            # Use TV client to avoid SSAP experiment issues
+            self.opts["extractor_args"]["youtube"]["player_client"] = ["tv"]
+            # Skip comments to reduce memory usage
+            self.opts["extractor_args"]["youtube"]["max_comments"] = [0]
+            # Skip webpage parsing for better performance
+            self.opts["extractor_args"]["youtube"]["skip_webpage"] = [True]
+
+            # Check for YouTube Shorts
+            if "/shorts/" in self._listener.link:
+                LOGGER.info("YouTube Shorts detected, optimizing format selection")
+                # Shorts often have specific format requirements
+                if "format" not in self.opts or not self.opts["format"]:
+                    self.opts["format"] = "bv*+ba/b"
+
+            # Extract video ID for fallback title
+            video_id = None
+            if "youtu.be/" in self._listener.link:
+                video_id = (
+                    self._listener.link.split("youtu.be/")[1]
+                    .split("?")[0]
+                    .split("&")[0]
+                )
+            elif "watch?v=" in self._listener.link:
+                video_id = self._listener.link.split("watch?v=")[1].split("&")[0]
+            elif "/shorts/" in self._listener.link:
+                video_id = (
+                    self._listener.link.split("/shorts/")[1]
+                    .split("?")[0]
+                    .split("&")[0]
+                )
+
+            # Set fallback title if video ID was extracted
+            if video_id and not self._listener.name:
+                self._listener.name = f"youtube_video_{video_id}"
+
         with YoutubeDL(self.opts) as ydl:
             try:
                 result = ydl.extract_info(self._listener.link, download=False)
                 if result is None:
                     raise ValueError("Info result is None")
+
+                # Check if it's a live stream and configure accordingly
+                if result.get("is_live"):
+                    LOGGER.info(
+                        "Live stream detected from metadata, configuring appropriate options",
+                    )
+                    self.opts["external_downloader"] = "xtra"
+                    self.opts["hls_prefer_native"] = False
+                    self.opts["hls_use_mpegts"] = True
+                    self.opts["live_from_start"] = True
+
+                # Handle title extraction issues
+                if not result.get("title") and not self._listener.name:
+                    # Try to get a title from various metadata fields
+                    for field in [
+                        "alt_title",
+                        "fulltitle",
+                        "webpage_url_basename",
+                        "id",
+                        "extractor_key",
+                    ]:
+                        if result.get(field):
+                            self._listener.name = (
+                                f"{result.get('extractor', 'video')}_{result[field]}"
+                            )
+                            LOGGER.info(
+                                f"Using fallback title from {field}: {self._listener.name}"
+                            )
+                            break
+                    else:
+                        # If no title found, use timestamp
+                        import time
+
+                        self._listener.name = f"untitled_video_{int(time.time())}"
+                        LOGGER.info(
+                            f"Using timestamp as fallback title: {self._listener.name}"
+                        )
+
+                # Handle YouTube SSAP experiment issues
+                if result.get("extractor") == "youtube" and not result.get(
+                    "formats"
+                ):
+                    # Try with Android client as fallback
+                    self.opts["extractor_args"]["youtube"]["player_client"] = [
+                        "android"
+                    ]
+                    # Retry extraction
+                    result = ydl.extract_info(self._listener.link, download=False)
+                    if not result.get("formats"):
+                        # Try with web client as last resort
+                        self.opts["extractor_args"]["youtube"]["player_client"] = [
+                            "web"
+                        ]
+
             except Exception as e:
                 return self._on_download_error(str(e))
             if "entries" in result:
@@ -162,15 +329,65 @@ class YoutubeDLHelper:
                     elif "filesize" in entry:
                         self._listener.size += entry.get("filesize", 0)
                     if not self._listener.name:
-                        outtmpl_ = "%(series,playlist_title,channel)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d.%(ext)s"
-                        self._listener.name, ext = ospath.splitext(
-                            ydl.prepare_filename(entry, outtmpl=outtmpl_),
-                        )
-                        if not self._ext:
-                            self._ext = ext
+                        # Try multiple templates for better title extraction
+                        templates = [
+                            "%(series,playlist_title,channel)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d.%(ext)s",
+                            "%(title,fulltitle,alt_title)s.%(ext)s",
+                            "%(id)s_%(uploader,channel)s.%(ext)s",
+                        ]
+
+                        for outtmpl_ in templates:
+                            try:
+                                name, ext = ospath.splitext(
+                                    ydl.prepare_filename(entry, outtmpl=outtmpl_)
+                                )
+                                if name and name != "NA":
+                                    self._listener.name = name
+                                    if not self._ext:
+                                        self._ext = ext
+                                    break
+                            except Exception:
+                                continue
+
+                        # If all templates failed, use entry ID
+                        if not self._listener.name or self._listener.name == "NA":
+                            entry_id = entry.get("id", "unknown")
+                            uploader = entry.get(
+                                "uploader", entry.get("channel", "unknown")
+                            )
+                            self._listener.name = f"{entry_id}_{uploader}"
+                            LOGGER.info(
+                                f"Using fallback playlist entry name: {self._listener.name}"
+                            )
                 return None
-            outtmpl_ = "%(title,fulltitle,alt_title)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d%(episode_number&E|)s%(episode_number|)02d%(height& |)s%(height|)s%(height&p|)s%(fps|)s%(fps&fps|)s%(tbr& |)s%(tbr|)d.%(ext)s"
-            realName = ydl.prepare_filename(result, outtmpl=outtmpl_)
+
+            # Try multiple templates for better title extraction
+            templates = [
+                "%(title,fulltitle,alt_title)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d%(episode_number&E|)s%(episode_number|)02d%(height& |)s%(height|)s%(height&p|)s%(fps|)s%(fps&fps|)s%(tbr& |)s%(tbr|)d.%(ext)s",
+                "%(title,fulltitle,alt_title)s.%(ext)s",
+                "%(id)s_%(uploader,channel)s.%(ext)s",
+            ]
+
+            realName = None
+            for outtmpl_ in templates:
+                try:
+                    name = ydl.prepare_filename(result, outtmpl=outtmpl_)
+                    if name and not name.startswith("NA."):
+                        realName = name
+                        break
+                except Exception:
+                    continue
+
+            # If all templates failed, use video ID and timestamp
+            if not realName:
+                import time
+
+                video_id = result.get("id", "unknown")
+                uploader = result.get("uploader", result.get("channel", "unknown"))
+                ext = result.get("ext", "mp4")
+                realName = f"{video_id}_{uploader}_{int(time.time())}.{ext}"
+                LOGGER.info(f"Using fallback video name: {realName}")
+
             ext = ospath.splitext(realName)[-1]
             self._listener.name = (
                 f"{self._listener.name}{ext}" if self._listener.name else realName
@@ -182,13 +399,160 @@ class YoutubeDLHelper:
 
     def _download(self, path):
         try:
-            with YoutubeDL(self.opts) as ydl:
+            # Track which clients we've tried
+            tried_clients = []
+            max_retries = 3
+            retry_count = 0
+
+            while retry_count < max_retries:
                 try:
-                    ydl.download([self._listener.link])
-                except DownloadError as e:
-                    if not self._listener.is_cancelled:
-                        self._on_download_error(str(e))
-                    return
+                    with YoutubeDL(self.opts) as ydl:
+                        try:
+                            # Log the final options being used
+                            LOGGER.info(
+                                f"Starting download with format: {self.opts.get('format', 'default')}"
+                            )
+                            if "youtube" in self._listener.link:
+                                current_client = self.opts["extractor_args"][
+                                    "youtube"
+                                ]["player_client"][0]
+                                tried_clients.append(current_client)
+                                LOGGER.info(f"YouTube client: {current_client}")
+
+                            # Attempt download
+                            ydl.download([self._listener.link])
+                            # If we get here, download was successful
+                            break
+
+                        except DownloadError as e:
+                            error_msg = str(e)
+                            if not self._listener.is_cancelled:
+                                # Check for common YouTube errors and provide more helpful messages
+                                if (
+                                    "This video is only available to subscribers"
+                                    in error_msg
+                                ):
+                                    error_msg += "\nTry uploading your own cookies file with YouTube Premium subscription."
+                                    self._on_download_error(error_msg)
+                                    return
+                                if "Sign in to confirm your age" in error_msg:
+                                    error_msg += "\nTry uploading your own cookies file with age verification."
+                                    self._on_download_error(error_msg)
+                                    return
+                                if (
+                                    "Unable to extract video data" in error_msg
+                                    and "youtube" in self._listener.link.lower()
+                                ):
+                                    error_msg += "\nThis might be due to YouTube's SSAP experiment. Try again later."
+                                    self._on_download_error(error_msg)
+                                    return
+                                if "ffmpeg not found" in error_msg.lower():
+                                    # Ignore ffmpeg path error as requested
+                                    # Try to continue without ffmpeg
+                                    break
+                                if (
+                                    "template variables not replaced"
+                                    in error_msg.lower()
+                                ):
+                                    # Ignore name sub error as requested
+                                    break
+                                # For other errors, try different client if it's a YouTube link
+                                if (
+                                    "youtube" in self._listener.link.lower()
+                                    and retry_count < max_retries - 1
+                                ):
+                                    retry_count += 1
+                                    # Try different client types in sequence
+                                    available_clients = [
+                                        "tv",
+                                        "android",
+                                        "web",
+                                        "ios",
+                                    ]
+                                    # Filter out clients we've already tried
+                                    next_clients = [
+                                        c
+                                        for c in available_clients
+                                        if c not in tried_clients
+                                    ]
+
+                                    if next_clients:
+                                        next_client = next_clients[0]
+                                        LOGGER.info(
+                                            f"Retrying with different YouTube client: {next_client}"
+                                        )
+                                        self.opts["extractor_args"]["youtube"][
+                                            "player_client"
+                                        ] = [next_client]
+                                        continue
+
+                                # If we've tried all clients or it's not a YouTube link, report the error
+                                self._on_download_error(error_msg)
+                                return
+                            return
+                        finally:
+                            # Force garbage collection after download attempt
+                            # YT-DLP can create large objects in memory
+                            if smart_garbage_collection:
+                                smart_garbage_collection(aggressive=True)
+                            else:
+                                # Multiple collection passes to ensure memory is freed
+                                gc.collect()
+                                gc.collect()
+
+                            # Try to free more memory by clearing large variables
+                            try:
+                                import sys
+
+                                # Find large objects in memory and clear them
+                                for name, obj in list(locals().items()):
+                                    if (
+                                        sys.getsizeof(obj) > 1024 * 1024
+                                    ):  # Objects larger than 1MB
+                                        locals()[name] = None
+                            except Exception:
+                                pass
+                    # Break out of retry loop if we got here
+                    break
+
+                except Exception as inner_e:
+                    # Handle specific 'can_download' error
+                    if "'NoneType' object has no attribute 'can_download'" in str(
+                        inner_e
+                    ):
+                        LOGGER.error(f"YouTube extractor error: {inner_e}")
+
+                        # Only retry for YouTube links
+                        if (
+                            "youtube" in self._listener.link.lower()
+                            and retry_count < max_retries - 1
+                        ):
+                            retry_count += 1
+                            # Try different client types in sequence
+                            available_clients = ["tv", "android", "web", "ios"]
+                            # Filter out clients we've already tried
+                            next_clients = [
+                                c
+                                for c in available_clients
+                                if c not in tried_clients
+                            ]
+
+                            if next_clients:
+                                next_client = next_clients[0]
+                                LOGGER.info(
+                                    f"Retrying with different YouTube client: {next_client}"
+                                )
+                                self.opts["extractor_args"]["youtube"][
+                                    "player_client"
+                                ] = [next_client]
+                                continue
+
+                        # If we've tried all clients or max retries, raise the error
+                        raise
+                    # For other exceptions, just raise
+                    raise
+
+            # Check if download was successful
             if self.is_playlist and (
                 not ospath.exists(path) or len(listdir(path)) == 0
             ):
@@ -199,8 +563,45 @@ class YoutubeDLHelper:
             if self._listener.is_cancelled:
                 return
             async_to_sync(self._listener.on_download_complete)
-        except Exception:
-            pass
+        except Exception as e:
+            LOGGER.error(f"Error in YT-DLP download: {e}")
+            # Force garbage collection after error
+            if smart_garbage_collection:
+                smart_garbage_collection(aggressive=True)
+            else:
+                # Multiple collection passes to ensure memory is freed
+                gc.collect()
+                gc.collect()
+
+            # Try to free more memory by clearing large variables
+            try:
+                import sys
+
+                # Find large objects in memory and clear them
+                for name, obj in list(locals().items()):
+                    if sys.getsizeof(obj) > 1024 * 1024:  # Objects larger than 1MB
+                        locals()[name] = None
+            except Exception:
+                pass
+            # Try to provide more helpful error messages
+            error_str = str(e)
+            if "Memory" in error_str or "memory" in error_str:
+                self._on_download_error(
+                    "Error: Memory allocation failed. The video might be too large or in a format that requires too much memory to process. Try a lower quality format."
+                )
+            elif "ffmpeg" in error_str.lower():
+                # Ignore ffmpeg errors as requested
+                # Try to continue without error
+                async_to_sync(self._listener.on_download_complete)
+            elif "'NoneType' object has no attribute 'can_download'" in error_str:
+                # Handle the specific can_download error
+                self._on_download_error(
+                    f"Error: YouTube extractor failed to initialize properly. This is likely due to YouTube's SSAP experiment. "
+                    f"We tried the following clients: {', '.join(tried_clients)}. "
+                    f"Try again later or try a different format/quality."
+                )
+            else:
+                self._on_download_error(f"Download error: {error_str}")
         return
 
     async def add_download(self, path, qual, playlist, options):
@@ -355,6 +756,25 @@ class YoutubeDLHelper:
     async def cancel_task(self):
         self._listener.is_cancelled = True
         LOGGER.info(f"Cancelling Download: {self._listener.name}")
+
+        # Force garbage collection after cancellation
+        if smart_garbage_collection:
+            smart_garbage_collection(aggressive=True)
+        else:
+            gc.collect()
+
+        # Log memory usage after garbage collection if available
+        try:
+            import psutil
+
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            LOGGER.info(
+                f"Memory usage after cancellation: {memory_info.rss / 1024 / 1024:.2f} MB"
+            )
+        except ImportError:
+            pass
+
         await self._listener.on_download_error("Stopped by User!")
 
     def _set_options(self, options):

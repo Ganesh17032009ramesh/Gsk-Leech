@@ -1,7 +1,7 @@
-from asyncio import sleep
+from asyncio import create_task, sleep
 
 from bot import multi_tags, task_dict, task_dict_lock, user_data
-from bot.core.aeon_client import Config
+from bot.core.config_manager import Config
 from bot.helper.ext_utils.bot_utils import new_task
 from bot.helper.ext_utils.status_utils import (
     MirrorStatus,
@@ -31,7 +31,6 @@ async def cancel(_, message):
             return
         task = await get_task_by_gid(gid)
         if task is None:
-            await delete_message(message)
             return
     elif reply_to_id := message.reply_to_message_id:
         async with task_dict_lock:
@@ -147,7 +146,7 @@ async def cancel_all_buttons(_, message):
     is_sudo = await CustomFilters.sudo("", message)
     button = create_cancel_buttons(is_sudo, message.from_user.id)
     can_msg = await send_message(message, "Choose tasks to cancel!", button)
-    await auto_delete_message(message, can_msg)
+    create_task(auto_delete_message(can_msg, time=300))  # noqa: RUF006
 
 
 @new_task

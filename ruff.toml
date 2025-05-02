@@ -2,9 +2,14 @@ fix = true
 unsafe-fixes = true
 line-length = 85
 target-version = "py313"
+exclude = ["dev"]
 
 [lint.mccabe]
 max-complexity = 100
+
+[lint.per-file-ignores]
+"!myjd/**.py" = ["N"]
+"!sabnzbdapi/**.py" = ["N"]
 
 [lint]
 select = [
@@ -42,6 +47,7 @@ ignore = [
     "PLR09",
     "RUF002",
     "SIM115",
+    "COM812",
     "PERF203",
     "PLR0912",
     "PLR0913",

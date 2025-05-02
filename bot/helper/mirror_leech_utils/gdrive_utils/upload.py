@@ -2,6 +2,7 @@ import contextlib
 from logging import getLogger
 from os import listdir, remove
 from os import path as ospath
+from time import sleep
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
@@ -15,7 +16,7 @@ from tenacity import (
 
 from bot.core.config_manager import Config
 from bot.helper.ext_utils.bot_utils import SetInterval, async_to_sync
-from bot.helper.ext_utils.files_utils import get_mime_type
+from bot.helper.ext_utils.files_utils import get_mime_type_sync as get_mime_type
 from bot.helper.mirror_leech_utils.gdrive_utils.helper import GoogleDriveHelper
 
 LOGGER = getLogger(__name__)
@@ -50,6 +51,42 @@ class GoogleDriveUpload(GoogleDriveHelper):
         link = None
         dir_id = None
         mime_type = None
+
+        # Generate MediaInfo for mirror tasks if enabled
+        # Check if MediaInfo is enabled for this user
+        user_mediainfo_enabled = self.listener.user_dict.get(
+            "MEDIAINFO_ENABLED", None
+        )
+        if user_mediainfo_enabled is None:
+            user_mediainfo_enabled = Config.MEDIAINFO_ENABLED
+
+        # Generate MediaInfo if enabled and it's a file (not a folder)
+        if user_mediainfo_enabled and ospath.isfile(self._path):
+            from bot.modules.mediainfo import gen_mediainfo
+
+            try:
+                # Generate MediaInfo for the file
+                self.listener.mediainfo_link = async_to_sync(
+                    gen_mediainfo, None, media_path=self._path, silent=True
+                )
+
+                # Check if MediaInfo was successfully generated
+                if (
+                    self.listener.mediainfo_link
+                    and self.listener.mediainfo_link.strip()
+                ):
+                    LOGGER.info(f"Generated MediaInfo for mirror file: {self._path}")
+                else:
+                    # Set mediainfo_link to None if it's empty or None
+                    self.listener.mediainfo_link = None
+                    LOGGER.info(
+                        "MediaInfo generation skipped or failed for mirror task. Proceeding with upload..."
+                    )
+            except Exception as e:
+                # Set mediainfo_link to None on error
+                self.listener.mediainfo_link = None
+                LOGGER.error(f"Error generating MediaInfo for mirror task: {e}")
+
         try:
             if ospath.isfile(self._path):
                 mime_type = get_mime_type(self._path)
@@ -142,8 +179,8 @@ class GoogleDriveUpload(GoogleDriveHelper):
         return new_id
 
     @retry(
-        wait=wait_exponential(multiplier=2, min=3, max=6),
-        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=5, max=30),
+        stop=stop_after_attempt(5),
         retry=retry_if_exception_type(Exception),
     )
     def _upload_file(
@@ -206,6 +243,10 @@ class GoogleDriveUpload(GoogleDriveHelper):
             except HttpError as err:
                 if err.resp.status in [500, 502, 503, 504, 429] and retries < 10:
                     retries += 1
+                    # Add exponential backoff for server errors
+                    sleep_time = 2**retries
+                    LOGGER.info(f"Server error, retrying in {sleep_time} seconds...")
+                    sleep(sleep_time)
                     continue
                 if err.resp.get("content-type", "").startswith("application/json"):
                     reason = (
@@ -216,16 +257,29 @@ class GoogleDriveUpload(GoogleDriveHelper):
                         "dailyLimitExceeded",
                     ]:
                         raise err
+
+                    # Handle rate limit errors with better backoff strategy
+
                     if self.use_sa:
                         if self.sa_count >= self.sa_number:
                             LOGGER.info(
                                 f"Reached maximum number of service accounts switching, which is {self.sa_count}",
                             )
+                            # Add a longer sleep before giving up
+                            LOGGER.info(
+                                "Sleeping for 60 seconds before final retry...",
+                            )
+                            sleep(60)
                             raise err
                         if self.listener.is_cancelled:
                             return None
+
+                        # Switch service account and add a delay
                         self.switch_service_account()
-                        LOGGER.info(f"Got: {reason}, Trying Again...")
+                        LOGGER.info(
+                            f"Switched service account due to {reason}, waiting 10 seconds before retrying...",
+                        )
+                        sleep(10)
                         return self._upload_file(
                             file_path,
                             file_name,
@@ -233,8 +287,16 @@ class GoogleDriveUpload(GoogleDriveHelper):
                             dest_id,
                             in_dir,
                         )
-                    LOGGER.error(f"Got: {reason}")
-                    raise err
+                    # If not using service accounts, add a longer sleep
+                    sleep(30)
+                    # Try again with the same account after sleeping
+                    return self._upload_file(
+                        file_path,
+                        file_name,
+                        mime_type,
+                        dest_id,
+                        in_dir,
+                    )
         if self.listener.is_cancelled:
             return None
         with contextlib.suppress(Exception):

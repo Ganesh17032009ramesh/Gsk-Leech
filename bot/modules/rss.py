@@ -42,14 +42,18 @@ headers = {
 async def rss_menu(event):
     user_id = event.from_user.id
     buttons = ButtonMaker()
-    buttons.data_button("Subscribe", f"rss sub {user_id}")
-    buttons.data_button("Subscriptions", f"rss list {user_id} 0")
-    buttons.data_button("Get Items", f"rss get {user_id}")
-    buttons.data_button("Edit", f"rss edit {user_id}")
-    buttons.data_button("Pause", f"rss pause {user_id}")
-    buttons.data_button("Resume", f"rss resume {user_id}")
-    buttons.data_button("Unsubscribe", f"rss unsubscribe {user_id}")
-    if await CustomFilters.sudo("", event):
+
+    # Check if user is owner
+    is_owner = await CustomFilters.owner("", event)
+
+    if is_owner:
+        buttons.data_button("Subscribe", f"rss sub {user_id}")
+        buttons.data_button("Subscriptions", f"rss list {user_id} 0")
+        buttons.data_button("Get Items", f"rss get {user_id}")
+        buttons.data_button("Edit", f"rss edit {user_id}")
+        buttons.data_button("Pause", f"rss pause {user_id}")
+        buttons.data_button("Resume", f"rss resume {user_id}")
+        buttons.data_button("Unsubscribe", f"rss unsubscribe {user_id}")
         buttons.data_button("All Subscriptions", f"rss listall {user_id} 0")
         buttons.data_button("Pause All", f"rss allpause {user_id}")
         buttons.data_button("Resume All", f"rss allresume {user_id}")
@@ -59,9 +63,14 @@ async def rss_menu(event):
             buttons.data_button("Shutdown Rss", f"rss shutdown {user_id}")
         else:
             buttons.data_button("Start Rss", f"rss start {user_id}")
-    buttons.data_button("Close", f"rss close {user_id}")
-    button = buttons.build_menu(2)
-    msg = f"Rss Menu | Users: {len(rss_dict)} | Running: {scheduler.running}"
+        buttons.data_button("Close", f"rss close {user_id}")
+        button = buttons.build_menu(2)
+        msg = f"Rss Menu | Users: {len(rss_dict)} | Running: {scheduler.running}"
+    else:
+        buttons.data_button("Close", f"rss close {user_id}")
+        button = buttons.build_menu(1)
+        msg = "RSS functionality is restricted to the bot owner only."
+
     return msg, button
 
 
@@ -84,24 +93,29 @@ async def rss_sub(_, message, pre_event):
         tag = f"@{username}"
     else:
         tag = message.from_user.mention
+    # Initialize variables
     msg = ""
     items = message.text.split("\n")
+    success_count = 0
+    error_count = 0
+
+    # Process each feed subscription
     for index, item in enumerate(items, start=1):
-        args = item.split()
-        if len(args) < 2:
-            await send_message(
-                message,
-                f"{item}. Wrong Input format. Read help message before adding new subcription!",
-            )
+        # Skip empty lines
+        if not item.strip():
             continue
+
+        # Log the item being processedargs = item.split()
+
         title = args[0].strip()
+        feed_link = args[1].strip()
+
         if (user_feeds := rss_dict.get(user_id, False)) and title in user_feeds:
             await send_message(
                 message,
                 f"This title {title} already subscribed! Choose another title!",
             )
             continue
-        feed_link = args[1].strip()
         if feed_link.startswith(("-inf", "-exf", "-c")):
             await send_message(
                 message,
@@ -154,21 +168,45 @@ async def rss_sub(_, message, pre_event):
                 size = get_size_bytes(sizes[0])
             else:
                 size = 0
-            msg += "<b>Subscribed!</b>"
-            msg += (
+            # Build a concise message for this feed
+            feed_msg = "<b>Subscribed!</b>"
+            feed_msg += (
                 f"\n<b>Title: </b><code>{title}</code>\n<b>Feed Url: </b>{feed_link}"
             )
-            msg += f"\n<b>latest record for </b>{rss_d.feed.title}:"
-            msg += f"\nName: <code>{last_title.replace('>', '').replace('<', '')}</code>"
+            feed_msg += f"\n<b>Latest record for </b>{rss_d.feed.title}:"
+            feed_msg += f"\nName: <code>{last_title.replace('>', '').replace('<', '')}</code>"
             try:
                 last_link = rss_d.entries[0]["links"][1]["href"]
             except IndexError:
                 last_link = rss_d.entries[0]["link"]
-            msg += f"\n<b>Link: </b><code>{last_link}</code>"
+            feed_msg += f"\n<b>Link: </b><code>{last_link}</code>"
             if size:
-                msg += f"\nSize: {get_readable_file_size(size)}"
-            msg += f"\n<b>Command: </b><code>{cmd}</code>"
-            msg += f"\n<b>Filters:-</b>\ninf: <code>{inf}</code>\nexf: <code>{exf}</code>\n<b>sensitive: </b>{stv}"
+                feed_msg += f"\nSize: {get_readable_file_size(size)}"
+            feed_msg += f"\n<b>Command: </b><code>{cmd}</code>"
+            feed_msg += f"\n<b>Filters:-</b>\ninf: <code>{inf}</code>\nexf: <code>{exf}</code>\n<b>Sensitive: </b>{stv}"
+
+            # Add site name
+            try:
+                from urllib.parse import urlparse
+
+                parsed_url = urlparse(feed_link)
+                site_name = parsed_url.netloc.replace("www.", "")
+                feed_msg += f"\n<b>Site: </b><code>{site_name}</code>"
+            except Exception:
+                pass
+            # Add a separator between feeds
+            if msg:
+                msg += "\n\n" + "-" * 30 + "\n\n"
+            msg += feed_msg
+            # Get site name from the URL
+            try:
+                from urllib.parse import urlparse
+
+                parsed_url = urlparse(feed_link)
+                site_name = parsed_url.netloc.replace("www.", "")
+            except Exception:
+                site_name = "Unknown"
+
             async with rss_dict_lock:
                 if rss_dict.get(user_id, False):
                     rss_dict[user_id][title] = {
@@ -181,6 +219,7 @@ async def rss_sub(_, message, pre_event):
                         "command": cmd,
                         "sensitive": stv,
                         "tag": tag,
+                        "site_name": site_name,
                     }
                 else:
                     rss_dict[user_id] = {
@@ -194,25 +233,70 @@ async def rss_sub(_, message, pre_event):
                             "command": cmd,
                             "sensitive": stv,
                             "tag": tag,
+                            "site_name": site_name,
                         },
                     }
             LOGGER.info(
-                f"Rss Feed Added: id: {user_id} - title: {title} - link: {feed_link} - c: {cmd} - inf: {inf} - exf: {exf} - stv {stv}",
+                f"RSS Feed Added: {title}",
             )
+            success_count += 1
         except (IndexError, AttributeError) as e:
-            emsg = f"The link: {feed_link} doesn't seem to be a RSS feed or it's region-blocked!"
-            await send_message(message, emsg + "\nError: " + str(e))
+            error_msg = f"The link: {feed_link} doesn't seem to be a RSS feed or it's region-blocked!"
+            LOGGER.error(f"Error adding RSS feed {title}: {error_msg} - {e}")
+            error_count += 1
+            # Don't send individual error messages for each feed to avoid flooding
+            # Just add to the error count
         except Exception as e:
-            await send_message(message, str(e))
+            LOGGER.error(f"Unexpected error adding RSS feed {title}: {e}")
+            error_count += 1
+            # Don't send individual error messages for each feed to avoid flooding
+            # Just add to the error count
+
+    # Send a summary message
+    summary = ""
+    if success_count > 0:
+        summary += f"✅ Successfully added {success_count} RSS feed(s)\n"
+    if error_count > 0:
+        summary += (
+            f"❌ Failed to add {error_count} RSS feed(s). Check logs for details.\n"
+        )
+
     if msg:
+        # If we have detailed messages for some feeds, include them
+        # But limit the message size to avoid Telegram API errors
+        if len(msg) > 3800:  # Leave some room for the summary
+            msg = msg[:3800] + "...\n(message truncated due to length)"
+
+        # Combine summary and detailed messages
+        final_msg = summary + "\n" + msg
+
+        # Update the database
         await database.rss_update(user_id)
-        await send_message(message, msg)
+
+        # Send the message with proper error handling
+        try:
+            await send_message(message, final_msg)
+        except Exception as e:
+            LOGGER.error(f"Error sending RSS subscription summary: {e}")
+            # Try with just the summary as a fallback
+            try:
+                await send_message(message, summary)
+            except Exception as e2:
+                LOGGER.error(f"Error sending simplified summary too: {e2}")
+
+        # Handle scheduler
         is_sudo = await CustomFilters.sudo("", message)
         if scheduler.state == 2:
             scheduler.resume()
         elif is_sudo and not scheduler.running:
             add_job()
             scheduler.start()
+    elif success_count > 0 or error_count > 0:
+        # If we have no detailed messages but some feeds were processed, send the summary
+        try:
+            await send_message(message, summary)
+        except Exception as e:
+            LOGGER.error(f"Error sending RSS subscription summary: {e}")
     await update_rss_menu(pre_event)
 
 
@@ -221,8 +305,8 @@ async def get_user_id(title):
         return next(
             (
                 (True, user_id)
-                for user_id, feed in rss_dict.items()
-                if feed["title"] == title
+                for user_id, feeds in rss_dict.items()
+                if title in feeds
             ),
             (False, False),
         )
@@ -271,10 +355,12 @@ async def rss_update(_, message, pre_event, state):
             if not rss_dict:
                 await database.trunc_table("rss")
     if updated:
-        LOGGER.info(f"Rss link with Title(s): {updated} has been {state}d!")
+        LOGGER.info(
+            f"RSS link(s) {state}d: {len(updated)}. {updated} has been {state}d!"
+        )
         await send_message(
             message,
-            f"Rss links with Title(s): <code>{updated}</code> has been {state}d!",
+            f"RSS links with Title(s): <code>{updated}</code> has been {state}d!",
         )
         if rss_dict.get(user_id):
             await database.rss_update(user_id)
@@ -300,6 +386,9 @@ async def rss_list(query, start, all_users=False):
                     list_feed += f"<b>Exf:</b> <code>{data['exf']}</code>\n"
                     list_feed += f"<b>Sensitive:</b> <code>{data.get('sensitive', False)}</code>\n"
                     list_feed += f"<b>Paused:</b> <code>{data['paused']}</code>\n"
+                    # Add site name if available
+                    if site_name := data.get("site_name"):
+                        list_feed += f"<b>Site:</b> <code>{site_name}</code>\n"
                     list_feed += f"<b>User:</b> {data['tag'].replace('@', '', 1)}"
                     index += 1
                     if index == 5:
@@ -315,6 +404,9 @@ async def rss_list(query, start, all_users=False):
                 list_feed += f"<b>Exf:</b> <code>{data['exf']}</code>\n"
                 list_feed += f"<b>Sensitive:</b> <code>{data.get('sensitive', False)}</code>\n"
                 list_feed += f"<b>Paused:</b> <code>{data['paused']}</code>\n"
+                # Add site name if available
+                if site_name := data.get("site_name"):
+                    list_feed += f"<b>Site:</b> <code>{site_name}</code>\n"
     buttons.data_button("Back", f"rss back {user_id}")
     buttons.data_button("Close", f"rss close {user_id}")
     if keysCount > 5:
@@ -465,7 +557,10 @@ async def event_handler(client, query, pfunc):
     handler_dict[user_id] = True
     start_time = time()
 
-    async def event_filter(_, __, event):
+    # Create a filter function that ignores the first two parameters
+    async def event_filter(*args):
+        # The actual event is the third parameter
+        event = args[2]
         user = event.from_user or event.sender_chat
         return bool(
             user.id == user_id
@@ -490,7 +585,11 @@ async def rss_listener(client, query):
     user_id = query.from_user.id
     message = query.message
     data = query.data.split()
-    if int(data[2]) != user_id and not await CustomFilters.sudo("", query):
+    # Check if user is owner
+    is_owner = await CustomFilters.owner("", query)
+
+    # Only allow owner to use RSS functionality
+    if not is_owner:
         await query.answer(
             text="You don't have permission to use these buttons!",
             show_alert=True,
@@ -621,7 +720,7 @@ Timeout: 60 sec. Argument -c for command and arguments
             async with rss_dict_lock:
                 for user in list(rss_dict.keys()):
                     for title in list(rss_dict[user].keys()):
-                        rss_dict[int(data[2])][title]["paused"] = True
+                        rss_dict[user][title]["paused"] = True
             if scheduler.running:
                 scheduler.pause()
             await database.rss_update_all()
@@ -629,7 +728,7 @@ Timeout: 60 sec. Argument -c for command and arguments
             async with rss_dict_lock:
                 for user in list(rss_dict.keys()):
                     for title in list(rss_dict[user].keys()):
-                        rss_dict[int(data[2])][title]["paused"] = False
+                        rss_dict[user][title]["paused"] = False
             if scheduler.state == 2:
                 scheduler.resume()
             elif not scheduler.running:
@@ -675,9 +774,40 @@ Timeout: 60 sec. Argument -c for command and arguments
 
 
 async def rss_monitor():
+    # Add memory management
+    import gc
+
+    import psutil
+
+    # Force garbage collection before starting
+    gc.collect()
+
+    # Check memory usage
+    memory_info = psutil.virtual_memory()
+    if memory_info.percent > 90:  # If memory usage is above 90%
+        LOGGER.warning(
+            f"High memory usage detected: {memory_info.percent}%. Skipping RSS run."
+        )
+        return
+
+    # Add memory management
+    import gc
+
+    import psutil
+
+    # Force garbage collection before starting
+    gc.collect()
+
+    # Check memory usage
+    memory_info = psutil.virtual_memory()
+    if memory_info.percent > 90:  # If memory usage is above 90%
+        LOGGER.warning(
+            f"High memory usage detected: {memory_info.percent}%. Skipping RSS run."
+        )
+        return
+
     chat = Config.RSS_CHAT
     if not chat:
-        LOGGER.warning("RSS_CHAT not added! Shutting down rss scheduler...")
         scheduler.shutdown(wait=False)
         return
     if len(rss_dict) == 0:
@@ -693,11 +823,17 @@ async def rss_monitor():
         ]
     elif chat.lstrip("-").isdigit():
         rss_chat_id = int(chat)
+
+    # Initialize variables
+
+    # Make a copy of the dictionary to avoid modification during iteration
     for user, items in list(rss_dict.items()):
-        for title, data in items.items():
+        for title, data in list(items.items()):
             try:
                 if data["paused"]:
                     continue
+
+                # Regular RSS feed processing
                 tries = 0
                 while True:
                     try:
@@ -716,13 +852,30 @@ async def rss_monitor():
                             raise
                         continue
                 rss_d = feed_parse(html)
+                all_paused = False
+
+                # Check if there are any entries in the feed
+                if not rss_d.entries:
+                    continue
+
                 try:
-                    last_link = rss_d.entries[0]["links"][1]["href"]
-                except IndexError:
-                    last_link = rss_d.entries[0]["link"]
-                finally:
-                    all_paused = False
-                last_title = rss_d.entries[0]["title"]
+                    # Safely get the last link
+                    if (
+                        "links" in rss_d.entries[0]
+                        and len(rss_d.entries[0]["links"]) > 1
+                    ):
+                        last_link = rss_d.entries[0]["links"][1]["href"]
+                    else:
+                        last_link = rss_d.entries[0]["link"]
+                except (IndexError, KeyError):
+                    continue
+
+                # Safely get the last title
+                if "title" in rss_d.entries[0]:
+                    last_title = rss_d.entries[0]["title"]
+                else:
+                    last_title = "Unknown Title"
+                # Check if we've seen this item before
                 if (
                     data["last_feed"] == last_link
                     or data["last_title"] == last_title
@@ -735,11 +888,32 @@ async def rss_monitor():
                     except Exception:
                         raise RssShutdownException("Rss Monitor Stopped!") from None
                     try:
-                        item_title = rss_d.entries[feed_count]["title"]
+                        # Check if feed_count is within the range of available entries
+                        if feed_count >= len(rss_d.entries):
+                            # Only log at debug level to avoid cluttering logs
+                            break
+
+                        # Safely get the item title
+                        if "title" in rss_d.entries[feed_count]:
+                            item_title = rss_d.entries[feed_count]["title"]
+                        else:
+                            item_title = f"Unknown Title {feed_count}"
+
+                        # Safely get the URL
                         try:
-                            url = rss_d.entries[feed_count]["links"][1]["href"]
-                        except IndexError:
-                            url = rss_d.entries[feed_count]["link"]
+                            if (
+                                "links" in rss_d.entries[feed_count]
+                                and len(rss_d.entries[feed_count]["links"]) > 1
+                            ):
+                                url = rss_d.entries[feed_count]["links"][1]["href"]
+                            else:
+                                url = rss_d.entries[feed_count]["link"]
+                        except (IndexError, KeyError):
+                            # If we can't get a URL, skip this entry
+                            feed_count += 1
+                            continue
+
+                        # Check if we've seen this item before
                         if (
                             data["last_feed"] == url
                             or data["last_title"] == item_title
@@ -755,9 +929,7 @@ async def rss_monitor():
                         else:
                             size = 0
                     except IndexError:
-                        LOGGER.warning(
-                            f"Reached Max index no. {feed_count} for this feed: {title}. Maybe you need to use less RSS_DELAY to not miss some torrents",
-                        )
+                        # Only log at debug level to avoid cluttering logs
                         break
                     parse = True
                     for flist in data["inf"]:
@@ -788,6 +960,23 @@ async def rss_monitor():
                             break
                     if not parse:
                         continue
+                    # Sanitize item title and URL to prevent Telegram API errors
+                    sanitized_title = item_title.replace(">", "").replace("<", "")
+                    # Remove zero-width characters and other potentially problematic characters
+                    sanitized_title = (
+                        sanitized_title.replace("\u200b", "")
+                        .replace("\u200c", "")
+                        .replace("\u200d", "")
+                    )
+                    # Replace any other control characters
+                    sanitized_title = "".join(
+                        c if ord(c) >= 32 or c == "\n" else " "
+                        for c in sanitized_title
+                    )
+
+                    # Sanitize URL
+                    sanitized_url = url
+
                     if command := data["command"]:
                         if (
                             size
@@ -797,31 +986,79 @@ async def rss_monitor():
                             feed_count += 1
                             continue
                         cmd = command.split(maxsplit=1)
-                        cmd.insert(1, url)
+                        cmd.insert(1, sanitized_url)
                         feed_msg = " ".join(cmd)
                         if not feed_msg.startswith("/"):
                             feed_msg = f"/{feed_msg}"
                     else:
-                        feed_msg = f"<b>Name: </b><code>{item_title.replace('>', '').replace('<', '')}</code>"
-                        feed_msg += f"\n\n<b>Link: </b><code>{url}</code>"
+                        feed_msg = f"<b>Name: </b><code>{sanitized_title}</code>"
+                        feed_msg += f"\n\n<b>Link: </b><code>{sanitized_url}</code>"
                         if size:
                             feed_msg += (
                                 f"\n<b>Size: </b>{get_readable_file_size(size)}"
                             )
-                    feed_msg += f"\n<b>Tag: </b><code>{data['tag']}</code> <code>{user}</code>"
-                    await send_rss(feed_msg, rss_chat_id, rss_topic_id)
-                    feed_count += 1
+                    # Add site name for all feeds
+                    # Use the site_name from the dictionary if available, otherwise extract it from the URL
+                    site_name = data.get("site_name", "")
+                    if not site_name:
+                        # Extract the site name from the URL
+                        try:
+                            from urllib.parse import urlparse
+
+                            parsed_url = urlparse(data["link"])
+                            site_name = parsed_url.netloc.replace("www.", "")
+                        except Exception:
+                            site_name = "Unknown"
+
+                    site_info = f" | <b>Site:</b> <code>{site_name}</code>"
+                    feed_msg += f"\n<b>Tag: </b><code>{data['tag']}</code> <code>{user}</code>{site_info}\n\n<blockquote><b>>> Powered by @aimmirror <<</b></blockquote>"
+
+                    # Validate message content before sending
+                    if not feed_msg.strip():
+                        LOGGER.error(
+                            f"Empty message generated for {title}. Skipping."
+                        )
+                        feed_count += 1
+                        continue
+
+                    # Sanitize message content to avoid Telegram API errors
+                    try:
+                        # Remove any potentially problematic characters
+                        feed_msg = (
+                            feed_msg.replace("\u200b", "")
+                            .replace("\u200c", "")
+                            .replace("\u200d", "")
+                        )
+
+                        # Ensure the message is not too long
+                        if len(feed_msg) > 4096:
+                            feed_msg = feed_msg[:4093] + "..."
+
+                        await send_rss(feed_msg, rss_chat_id, rss_topic_id)
+
+                        feed_count += 1
+                    except Exception as e:
+                        LOGGER.error(f"Error sending RSS message for {title}: {e}")
+                        # Try with a simplified message as a fallback
+                        try:
+                            simplified_msg = (
+                                f"<b>Title:</b> {item_title}\n<b>Link:</b> {url}"
+                            )
+                            await send_rss(simplified_msg, rss_chat_id, rss_topic_id)
+                            feed_count += 1
+                        except Exception as e2:
+                            LOGGER.error(
+                                f"Failed to send simplified message too: {e2}"
+                            )
+                            feed_count += 1
                 async with rss_dict_lock:
                     if user not in rss_dict or not rss_dict[user].get(title, False):
                         continue
-                    rss_dict[user][title].update(
-                        {"last_feed": last_link, "last_title": last_title},
-                    )
+                    update_data = {"last_feed": last_link, "last_title": last_title}
+
+                    rss_dict[user][title].update(update_data)
                 await database.rss_update(user)
-                LOGGER.info(f"Feed Name: {title}")
-                LOGGER.info(f"Last item: {last_link}")
-            except RssShutdownException as ex:
-                LOGGER.info(ex)
+            except RssShutdownException:
                 break
             except Exception as e:
                 LOGGER.error(f"{e} - Feed Name: {title} - Feed Link: {data['link']}")
@@ -831,16 +1068,21 @@ async def rss_monitor():
 
 
 def add_job():
+    # Use a longer interval to reduce memory pressure
+    rss_delay = max(600, Config.RSS_DELAY)  # Minimum 10 minutes
+
     scheduler.add_job(
         rss_monitor,
-        trigger=IntervalTrigger(seconds=Config.RSS_DELAY),
+        trigger=IntervalTrigger(seconds=rss_delay),
         id="0",
         name="RSS",
-        misfire_grace_time=15,
+        misfire_grace_time=120,  # Increased grace time to handle longer executions
         max_instances=1,
-        next_run_time=datetime.now() + timedelta(seconds=20),
+        next_run_time=datetime.now() + timedelta(seconds=30),
         replace_existing=True,
+        coalesce=True,  # Combine missed executions into a single one
     )
+    LOGGER.info(f"RSS job scheduled with interval of {rss_delay} seconds")
 
 
 add_job()

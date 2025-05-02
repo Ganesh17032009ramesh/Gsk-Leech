@@ -99,12 +99,22 @@ class GoogleDriveHelper:
         return build("drive", "v3", http=authorized_http, cache_discovery=False)
 
     def switch_service_account(self):
+        # Keep track of previously used service account to avoid using it again immediately
+        prev_sa_index = self.sa_index
+
+        # If we've used all service accounts, start from the beginning
         if self.sa_index == self.sa_number - 1:
             self.sa_index = 0
         else:
             self.sa_index += 1
-        self.sa_count += 1
-        LOGGER.info(f"Switching to {self.sa_index} index")
+
+        # If we only have one service account, don't increment the counter
+        if self.sa_number > 1:
+            self.sa_count += 1
+
+        LOGGER.info(
+            f"Switching from SA index {prev_sa_index} to {self.sa_index} (Total used: {self.sa_count})",
+        )
         self.service = self.authorize()
 
     def get_id_from_url(self, link, user_id=""):
@@ -130,8 +140,8 @@ class GoogleDriveHelper:
         return parse_qs(parsed.query)["id"][0]
 
     @retry(
-        wait=wait_exponential(multiplier=2, min=3, max=6),
-        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=5, max=30),
+        stop=stop_after_attempt(5),
         retry=retry_if_exception_type(Exception),
     )
     def set_permission(self, file_id):
@@ -148,8 +158,8 @@ class GoogleDriveHelper:
         )
 
     @retry(
-        wait=wait_exponential(multiplier=2, min=3, max=6),
-        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=5, max=30),
+        stop=stop_after_attempt(5),
         retry=retry_if_exception_type(Exception),
     )
     def get_file_metadata(self, file_id):
@@ -164,8 +174,8 @@ class GoogleDriveHelper:
         )
 
     @retry(
-        wait=wait_exponential(multiplier=2, min=3, max=6),
-        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=5, max=30),
+        stop=stop_after_attempt(5),
         retry=retry_if_exception_type(Exception),
     )
     def get_files_by_folder_id(self, folder_id, item_type=""):
@@ -199,8 +209,8 @@ class GoogleDriveHelper:
         return files
 
     @retry(
-        wait=wait_exponential(multiplier=2, min=3, max=6),
-        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=5, max=30),
+        stop=stop_after_attempt(5),
         retry=retry_if_exception_type(Exception),
     )
     def create_directory(self, directory_name, dest_id):

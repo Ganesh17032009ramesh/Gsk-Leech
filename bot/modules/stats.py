@@ -1,4 +1,4 @@
-from asyncio import gather
+from asyncio import create_task, gather
 from re import search as research
 from time import time
 
@@ -21,7 +21,7 @@ from bot.helper.ext_utils.status_utils import (
 )
 from bot.helper.telegram_helper.message_utils import (
     auto_delete_message,
-    delete_message,
+    delete_links,
     send_message,
 )
 
@@ -32,7 +32,7 @@ commands = {
     "python": (["python3", "--version"], r"Python ([\d.]+)"),
     "rclone": (["xone", "--version"], r"rclone v([\d.]+)"),
     "yt-dlp": (["yt-dlp", "--version"], r"([\d.]+)"),
-    "ffmpeg": (["xtra", "-version"], r"ffmpeg version (n[\d.]+)"),
+    "ffmpeg": (["xtra", "-version"], r"ffmpeg version ([\d.\w-]+)"),
     "7z": (["7z", "i"], r"7-Zip ([\d.]+)"),
 }
 
@@ -75,9 +75,12 @@ async def bot_stats(_, message):
 <b>ffmpeg:</b> {commands["ffmpeg"]}
 <b>7z:</b> {commands["7z"]}
 """
-    reply_message = await send_message(message, stats)
-    await delete_message(message)
-    await auto_delete_message(reply_message)
+    # Delete the /stats command message immediately
+    await delete_links(message)
+
+    # Send stats message and create auto-delete task
+    stats_msg = await send_message(message, stats)
+    create_task(auto_delete_message(stats_msg, time=300))  # noqa: RUF006
 
 
 async def get_version_async(command, regex):

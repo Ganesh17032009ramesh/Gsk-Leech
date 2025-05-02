@@ -1,8 +1,15 @@
+from asyncio import create_task
+
 from bot.helper.ext_utils.bot_utils import new_task, sync_to_async
 from bot.helper.ext_utils.links_utils import is_gdrive_link
 from bot.helper.ext_utils.status_utils import get_readable_file_size
 from bot.helper.mirror_leech_utils.gdrive_utils.count import GoogleDriveCount
-from bot.helper.telegram_helper.message_utils import delete_message, send_message
+from bot.helper.telegram_helper.message_utils import (
+    auto_delete_message,
+    delete_links,
+    delete_message,
+    send_message,
+)
 
 
 @new_task
@@ -27,16 +34,25 @@ async def count_node(_, message):
         )
         if mime_type is None:
             await send_message(message, name)
+            await delete_links(message)  # Delete command and replied message
             return
         await delete_message(msg)
-        msg = f"<b>Name: </b><code>{name}</code>"
-        msg += f"\n\n<b>Size: </b>{get_readable_file_size(size)}"
-        msg += f"\n\n<b>Type: </b>{mime_type}"
+        result_msg = f"<b>Name: </b><code>{name}</code>"
+        result_msg += f"\n\n<b>Size: </b>{get_readable_file_size(size)}"
+        result_msg += f"\n\n<b>Type: </b>{mime_type}"
         if mime_type == "Folder":
-            msg += f"\n<b>SubFolders: </b>{folders}"
-            msg += f"\n<b>Files: </b>{files}"
-        msg += f"\n\n<b>cc: </b>{tag}"
+            result_msg += f"\n<b>SubFolders: </b>{folders}"
+            result_msg += f"\n<b>Files: </b>{files}"
+        result_msg += f"\n\n<b>cc: </b>{tag}"
+        await send_message(message, result_msg)
+        await delete_links(
+            message,
+        )  # Delete command and replied message after counting
     else:
-        msg = "Send Gdrive link along with command or by replying to the link by command"
-
-    await send_message(message, msg)
+        help_msg = "Send Gdrive link along with command or by replying to the link by command"
+        msg = await send_message(message, help_msg)
+        # Auto delete help message and command after 5 minutes
+        create_task(auto_delete_message(msg, time=300))  # noqa: RUF006
+        create_task(auto_delete_message(message, time=300))  # noqa: RUF006
+        if reply_to := message.reply_to_message:
+            create_task(auto_delete_message(reply_to, time=300))  # noqa: RUF006

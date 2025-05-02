@@ -12,7 +12,7 @@ from aiofiles.os import listdir, makedirs
 from aiofiles.os import path as aiopath
 
 from bot.core.config_manager import Config
-from bot.helper.ext_utils.bot_utils import cmd_exec, sync_to_async
+from bot.helper.ext_utils.bot_utils import cmd_exec
 from bot.helper.ext_utils.files_utils import count_files_and_folders, get_mime_type
 
 LOGGER = getLogger(__name__)
@@ -290,9 +290,48 @@ class RcloneTransferHelper:
             folders, files = await count_files_and_folders(path)
             rc_path += f"/{self._listener.name}" if rc_path else self._listener.name
         else:
-            mime_type = await sync_to_async(get_mime_type, path)
+            mime_type = await get_mime_type(path)
             folders = 0
             files = 1
+
+            # Generate MediaInfo for rclone uploads if enabled
+            # Check if MediaInfo is enabled for this user
+            user_mediainfo_enabled = self._listener.user_dict.get(
+                "MEDIAINFO_ENABLED", None
+            )
+            if user_mediainfo_enabled is None:
+                user_mediainfo_enabled = Config.MEDIAINFO_ENABLED
+
+            # Generate MediaInfo if enabled and it's a file (not a folder)
+            if user_mediainfo_enabled:
+                from bot.modules.mediainfo import gen_mediainfo
+
+                try:
+                    # Generate MediaInfo for the file
+                    self._listener.mediainfo_link = await gen_mediainfo(
+                        None, media_path=path, silent=True
+                    )
+
+                    # Check if MediaInfo was successfully generated
+                    if (
+                        self._listener.mediainfo_link
+                        and self._listener.mediainfo_link.strip()
+                    ):
+                        LOGGER.info(
+                            f"Generated MediaInfo for rclone upload file: {path}"
+                        )
+                    else:
+                        # Set mediainfo_link to None if it's empty or None
+                        self._listener.mediainfo_link = None
+                        LOGGER.info(
+                            "MediaInfo generation skipped or failed for rclone upload. Proceeding with upload..."
+                        )
+                except Exception as e:
+                    # Set mediainfo_link to None on error
+                    self._listener.mediainfo_link = None
+                    LOGGER.error(
+                        f"Error generating MediaInfo for rclone upload: {e}"
+                    )
 
         try:
             remote_opts = await self._get_remote_options(oconfig_path, oremote)

@@ -32,7 +32,14 @@ async def stop_duplicate_check(listener):
     LOGGER.info(f"Checking File/Folder if already in Drive: {name}")
 
     if listener.compress:
-        name = f"{name}.7z"
+        # Check if it's the new compression feature or the old 7z compression
+        if hasattr(listener, "compression_enabled") and listener.compression_enabled:
+            # For the new compression feature, we keep the original name
+            # as the compressed file will maintain its extension
+            pass
+        else:
+            # For the old 7z compression
+            name = f"{name}.7z"
     elif listener.extract:
         try:
             name = get_base_name(name)

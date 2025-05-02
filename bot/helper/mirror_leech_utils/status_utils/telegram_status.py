@@ -26,6 +26,19 @@ class TelegramStatus:
         return MirrorStatus.STATUS_DOWNLOAD
 
     def name(self):
+        # If this is an upload task and the uploader has a current file name, use that
+        if (
+            self._status == "up"
+            and hasattr(self._obj, "_up_path")
+            and self._obj._up_path
+        ):
+            # Extract the filename from the path
+            import os
+
+            current_filename = os.path.basename(self._obj._up_path)
+            if current_filename:
+                return current_filename
+        # Otherwise use the original name
         return self.listener.name
 
     def progress(self):

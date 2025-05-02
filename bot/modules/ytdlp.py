@@ -1,5 +1,6 @@
 from asyncio import Event, create_task, wait_for
 from functools import partial
+from os import path as ospath
 from time import time
 
 from httpx import AsyncClient
@@ -38,7 +39,6 @@ from bot.helper.telegram_helper.message_utils import (
 @new_task
 async def select_format(_, query, obj):
     data = query.data.split()
-    message = query.message
     await query.answer()
 
     if data[1] == "dict":
@@ -48,6 +48,20 @@ async def select_format(_, query, obj):
         await obj.mp3_subbuttons()
     elif data[1] == "audio":
         await obj.audio_format()
+    elif data[1] == "info":
+        # For section headers, show a helpful message
+        await query.answer(
+            "This is a section header. Please select a format below.",
+            show_alert=True,
+        )
+    elif data[1] == "section":
+        # Handle section selection
+        try:
+            section = data[2]
+            await obj.show_section(section)
+        except Exception as e:
+            LOGGER.error(f"Error in section selection: {e}")
+            await query.answer(f"Error: {e!s}", show_alert=True)
     elif data[1] == "aq":
         if data[2] == "back":
             await obj.audio_format()
@@ -56,7 +70,23 @@ async def select_format(_, query, obj):
     elif data[1] == "back":
         await obj.back_to_main()
     elif data[1] == "cancel":
-        await edit_message(message, "Task has been cancelled.")
+        # First send cancellation message
+        cancel_msg = await send_message(
+            obj.listener.message,
+            f"{obj.listener.tag} Task has been cancelled!",
+        )
+
+        # Delete the selection menu
+        await delete_message(obj._reply_to)
+
+        # Delete the original command
+        await delete_message(obj.listener.message)
+
+        # Create background task for auto-deletion
+        create_task(  # noqa: RUF006
+            auto_delete_message(cancel_msg, time=300),
+        )  # 5 minutes auto-delete
+
         obj.qual = None
         obj.listener.is_cancelled = True
         obj.event.set()
@@ -95,38 +125,239 @@ class YtSelection:
         try:
             await wait_for(self.event.wait(), timeout=self._timeout)
         except Exception:
-            await edit_message(self._reply_to, "Timed Out. Task has been cancelled!")
+            # Delete both original command and its replied message
+            await delete_links(self.listener.message)
+
+            # Send new timeout message instead of editing
+            timeout_msg = await send_message(
+                self.listener.message,
+                f"{self.listener.tag} Timed Out. Task has been cancelled!",
+            )
+
+            # Delete the selection menu
+            await delete_message(self._reply_to)
+
+            # Create background task to delete timeout message after 5 minutes
+            create_task(  # noqa: RUF006
+                auto_delete_message(timeout_msg, time=300),
+            )  # 5 minutes auto-delete
+
             self.qual = None
             self.listener.is_cancelled = True
             self.event.set()
         finally:
             self.listener.client.remove_handler(*handler)
 
+    async def show_section(self, section):
+        buttons = ButtonMaker()
+
+        if self._is_playlist:
+            # For playlists, show predefined formats
+            if section == "sd":
+                # SD formats (144p, 240p, 360p, 480p) in ascending order
+                for i in ["144", "240", "360", "480"]:
+                    # MP4 format with audio
+                    b_data = f"{i}|mp4"
+                    buttons.data_button(f"{i}p MP4", f"ytq {b_data}")
+
+                    # WebM format with audio
+                    b_data = f"{i}|webm"
+                    buttons.data_button(f"{i}p WebM", f"ytq {b_data}")
+
+            elif section == "hd":
+                # HD formats (720p, 1080p) in ascending order
+                for i in ["720", "1080"]:
+                    # MP4 format with audio
+                    b_data = f"{i}|mp4"
+                    buttons.data_button(f"{i}p MP4", f"ytq {b_data}")
+
+                    # WebM format with audio
+                    b_data = f"{i}|webm"
+                    buttons.data_button(f"{i}p WebM", f"ytq {b_data}")
+
+                    # AV1 format with audio
+                    b_data = f"{i}|av1"
+                    buttons.data_button(f"{i}p AV1", f"ytq {b_data}")
+
+            elif section == "4k":
+                # 4K formats (1440p, 2160p) in ascending order
+                for i in ["1440", "2160"]:
+                    # MP4 format with audio
+                    b_data = f"{i}|mp4"
+                    buttons.data_button(f"{i}p MP4", f"ytq {b_data}")
+
+                    # WebM format with audio
+                    b_data = f"{i}|webm"
+                    buttons.data_button(f"{i}p WebM", f"ytq {b_data}")
+
+                    # AV1 format with audio
+                    b_data = f"{i}|av1"
+                    buttons.data_button(f"{i}p AV1", f"ytq {b_data}")
+
+        # For single videos, show available formats from the extracted info
+        elif section in ["sd", "hd", "4k"]:
+            # Define resolution ranges for each section
+            if section == "sd":
+                # SD: below 720p
+                def res_range(r):
+                    return r < 720
+            elif section == "hd":
+                # HD: 720p to 1440p (exclusive)
+                def res_range(r):
+                    return 720 <= r < 1440
+            else:  # 4k
+                # 4K: 1440p and above
+                def res_range(r):
+                    return r >= 1440
+
+            # Get all resolutions in this range
+            matching_resolutions = []
+            for r in self.formats:
+                # Check if the format name contains 'p' and has a number before it
+                if "p" in r:
+                    try:
+                        # Try to extract the resolution number
+                        res_num = int(r.split("p")[0])
+                        # Check if it's in the desired range
+                        if res_range(res_num):
+                            matching_resolutions.append(r)
+                    except (ValueError, IndexError):
+                        # Skip formats that don't have a valid resolution number
+                        continue
+
+            # Sort resolutions in ascending order
+            def get_resolution(format_name):
+                try:
+                    if "p" in format_name:
+                        return int(format_name.split("p")[0])
+                    return 0
+                except (ValueError, IndexError):
+                    return 0
+
+            # Check if we found any matching resolutions
+            if not matching_resolutions:
+                # No formats in this resolution range
+                buttons.data_button(
+                    f"No {section.upper()} formats available", "ytq info"
+                )
+            else:
+                # Add formats in ascending order
+                for b_name in sorted(matching_resolutions, key=get_resolution):
+                    try:
+                        tbr_dict = self.formats[b_name]
+                        if len(tbr_dict) == 1:
+                            tbr, v_list = next(iter(tbr_dict.items()))
+                            size_str = get_readable_file_size(v_list[0])
+                            # Highlight AV1 formats
+                            if "av1" in b_name.lower():
+                                buttonName = f"🔸 {b_name} ({size_str})"
+                            else:
+                                buttonName = f"{b_name} ({size_str})"
+                            buttons.data_button(
+                                buttonName, f"ytq sub {b_name} {tbr}"
+                            )
+                        else:
+                            buttons.data_button(b_name, f"ytq dict {b_name}")
+                    except Exception as e:
+                        LOGGER.error(f"Error adding format button {b_name}: {e}")
+                        continue
+
+        # Audio options section is the same for both playlist and single videos
+        if section == "audio":
+            # Audio options
+            buttons.data_button("MP3 Audio", "ytq mp3")
+            buttons.data_button("Other Audio Formats", "ytq audio")
+            buttons.data_button("Best Audio", "ytq ba/b")
+
+        # Quick options section is the same for both playlist and single videos
+        elif section == "quick":
+            # Quick options
+            buttons.data_button("Best Video", "ytq bv*+ba/b")
+            buttons.data_button("Best Audio", "ytq ba/b")
+
+        # Add back button
+        buttons.data_button("Back", "ytq back", "footer")
+        buttons.data_button("Cancel", "ytq cancel", "footer")
+
+        subbuttons = buttons.build_menu(2)
+        msg = f"Choose {section.upper()} Format:\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
+        await edit_message(self._reply_to, msg, subbuttons)
+
     async def get_quality(self, result):
         buttons = ButtonMaker()
         if "entries" in result:
             self._is_playlist = True
-            for i in ["144", "240", "360", "480", "720", "1080", "1440", "2160"]:
+
+            # Store all formats for later use
+            # SD formats
+            for i in ["144", "240", "360", "480"]:
+                # MP4 format with audio
                 video_format = (
                     f"bv*[height<=?{i}][ext=mp4]+ba[ext=m4a]/b[height<=?{i}]"
                 )
                 b_data = f"{i}|mp4"
                 self.formats[b_data] = video_format
-                buttons.data_button(f"{i}-mp4", f"ytq {b_data}")
+
+                # WebM format with audio
                 video_format = f"bv*[height<=?{i}][ext=webm]+ba/b[height<=?{i}]"
                 b_data = f"{i}|webm"
                 self.formats[b_data] = video_format
-                buttons.data_button(f"{i}-webm", f"ytq {b_data}")
-            buttons.data_button("MP3", "ytq mp3")
-            buttons.data_button("Audio Formats", "ytq audio")
-            buttons.data_button("Best Videos", "ytq bv*+ba/b")
-            buttons.data_button("Best Audios", "ytq ba/b")
+
+            # HD formats
+            for i in ["720", "1080"]:
+                # MP4 format with audio
+                video_format = (
+                    f"bv*[height<=?{i}][ext=mp4]+ba[ext=m4a]/b[height<=?{i}]"
+                )
+                b_data = f"{i}|mp4"
+                self.formats[b_data] = video_format
+
+                # WebM format with audio
+                video_format = f"bv*[height<=?{i}][ext=webm]+ba/b[height<=?{i}]"
+                b_data = f"{i}|webm"
+                self.formats[b_data] = video_format
+
+                # AV1 format with audio
+                video_format = f"bv*[height<=?{i}][vcodec*=av01]+ba/b[height<=?{i}]"
+                b_data = f"{i}|av1"
+                self.formats[b_data] = video_format
+
+            # 4K formats
+            for i in ["1440", "2160"]:
+                # MP4 format with audio
+                video_format = (
+                    f"bv*[height<=?{i}][ext=mp4]+ba[ext=m4a]/b[height<=?{i}]"
+                )
+                b_data = f"{i}|mp4"
+                self.formats[b_data] = video_format
+
+                # WebM format with audio
+                video_format = f"bv*[height<=?{i}][ext=webm]+ba/b[height<=?{i}]"
+                b_data = f"{i}|webm"
+                self.formats[b_data] = video_format
+
+                # AV1 format with audio
+                video_format = f"bv*[height<=?{i}][vcodec*=av01]+ba/b[height<=?{i}]"
+                b_data = f"{i}|av1"
+                self.formats[b_data] = video_format
+
+            # Create main menu with sections
+            # Resolution sections in ascending order
+            buttons.data_button("🔹 SD FORMATS (144p-480p) 🔹", "ytq section sd")
+            buttons.data_button("🔹 HD FORMATS (720p-1080p) 🔹", "ytq section hd")
+            buttons.data_button("🔹 4K FORMATS (1440p-2160p) 🔹", "ytq section 4k")
+            buttons.data_button("🔹 AUDIO OPTIONS 🔹", "ytq section audio")
+            buttons.data_button("🔹 QUICK OPTIONS 🔹", "ytq section quick")
             buttons.data_button("Cancel", "ytq cancel", "footer")
-            self._main_buttons = buttons.build_menu(3)
-            msg = f"Choose Playlist Videos Quality:\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
+
+            self._main_buttons = buttons.build_menu(1)
+            msg = f"Choose Playlist Videos Quality Category:\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
         else:
             format_dict = result.get("formats")
             if format_dict is not None:
+                # Group formats by codec for better organization
+                codec_groups = {}
+
                 for item in format_dict:
                     if item.get("tbr"):
                         format_id = item["format_id"]
@@ -138,6 +369,7 @@ class YtSelection:
                         else:
                             size = 0
 
+                        # Handle audio formats
                         if item.get("video_ext") == "none" and (
                             item.get("resolution") == "audio only"
                             or item.get("acodec") != "none"
@@ -148,11 +380,28 @@ class YtSelection:
                                 f"{item.get('acodec') or format_id}-{item['ext']}"
                             )
                             v_format = format_id
+
+                            # Add to audio group
+                            codec_group = "audio"
+
+                        # Handle video formats
                         elif item.get("height"):
                             height = item["height"]
                             ext = item["ext"]
                             fps = item["fps"] if item.get("fps") else ""
-                            b_name = f"{height}p{fps}-{ext}"
+
+                            # Identify codec for grouping
+                            vcodec = item.get("vcodec", "")
+                            if "av01" in vcodec:
+                                codec_group = "av1"
+                            elif "avc" in vcodec or "h264" in vcodec:
+                                codec_group = "h264"
+                            elif "vp9" in vcodec:
+                                codec_group = "vp9"
+                            else:
+                                codec_group = ext
+
+                            b_name = f"{height}p{fps}-{codec_group}"
                             ba_ext = (
                                 "[ext=m4a]" if self._is_m4a and ext == "mp4" else ""
                             )
@@ -160,27 +409,42 @@ class YtSelection:
                         else:
                             continue
 
+                        # Store format info
                         self.formats.setdefault(b_name, {})[f"{item['tbr']}"] = [
                             size,
                             v_format,
                         ]
 
-                for b_name, tbr_dict in self.formats.items():
-                    if len(tbr_dict) == 1:
-                        tbr, v_list = next(iter(tbr_dict.items()))
-                        buttonName = (
-                            f"{b_name} ({get_readable_file_size(v_list[0])})"
-                        )
-                        buttons.data_button(buttonName, f"ytq sub {b_name} {tbr}")
-                    else:
-                        buttons.data_button(b_name, f"ytq dict {b_name}")
-            buttons.data_button("MP3", "ytq mp3")
-            buttons.data_button("Audio Formats", "ytq audio")
-            buttons.data_button("Best Video", "ytq bv*+ba/b")
-            buttons.data_button("Best Audio", "ytq ba/b")
+                        # Group by codec for better UI organization
+                        codec_groups.setdefault(codec_group, []).append(b_name)
+
+                # Group formats by resolution for better organization
+                resolutions = {}
+
+                # Collect all formats by resolution
+                for codec_group, b_names in codec_groups.items():
+                    if codec_group != "audio":
+                        for b_name in b_names:
+                            if "p" in b_name:
+                                resolution = int(b_name.split("p")[0])
+                                resolutions.setdefault(resolution, []).append(
+                                    (b_name, codec_group)
+                                )
+
+                # Store formats for section-based display
+                # We'll use the show_section method to display them when needed
+
+            # Create main menu with sections for non-playlist videos
+            # Resolution sections in ascending order
+            buttons.data_button("🔹 SD FORMATS (144p-480p) 🔹", "ytq section sd")
+            buttons.data_button("🔹 HD FORMATS (720p-1080p) 🔹", "ytq section hd")
+            buttons.data_button("🔹 4K FORMATS (1440p-2160p) 🔹", "ytq section 4k")
+            buttons.data_button("🔹 AUDIO OPTIONS 🔹", "ytq section audio")
+            buttons.data_button("🔹 QUICK OPTIONS 🔹", "ytq section quick")
             buttons.data_button("Cancel", "ytq cancel", "footer")
-            self._main_buttons = buttons.build_menu(2)
-            msg = f"Choose Video Quality:\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
+
+            self._main_buttons = buttons.build_menu(1)
+            msg = f"Choose Video Quality Category:\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
         self._reply_to = await send_message(
             self.listener.message,
             msg,
@@ -193,9 +457,9 @@ class YtSelection:
 
     async def back_to_main(self):
         if self._is_playlist:
-            msg = f"Choose Playlist Videos Quality:\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
+            msg = f"Choose Playlist Videos Quality Category:\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
         else:
-            msg = f"Choose Video Quality:\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
+            msg = f"Choose Video Quality Category:\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
         await edit_message(self._reply_to, msg, self._main_buttons)
 
     async def qual_subbuttons(self, b_name):
@@ -213,7 +477,7 @@ class YtSelection:
     async def mp3_subbuttons(self):
         i = "s" if self._is_playlist else ""
         buttons = ButtonMaker()
-        audio_qualities = [64, 128, 320]
+        audio_qualities = [64, 128, 192, 256, 320]
         for q in audio_qualities:
             audio_format = f"ba/b-mp3-{q}"
             buttons.data_button(f"{q}K-mp3", f"ytq {audio_format}")
@@ -226,12 +490,32 @@ class YtSelection:
     async def audio_format(self):
         i = "s" if self._is_playlist else ""
         buttons = ButtonMaker()
-        for frmt in ["aac", "alac", "flac", "m4a", "opus", "vorbis", "wav"]:
+        # Add more audio formats and organize them
+        for frmt in ["aac", "alac", "flac", "m4a", "mp3", "opus", "vorbis", "wav"]:
             audio_format = f"ba/b-{frmt}-"
-            buttons.data_button(frmt, f"ytq aq {audio_format}")
+            # Add format description
+            if frmt == "flac":
+                desc = "(Lossless)"
+            elif frmt == "alac":
+                desc = "(Apple Lossless)"
+            elif frmt == "opus":
+                desc = "(Best Compressed)"
+            elif frmt == "mp3":
+                desc = "(Common)"
+            elif frmt == "aac":
+                desc = "(AAC)"
+            elif frmt == "m4a":
+                desc = "(AAC in M4A)"
+            elif frmt == "vorbis":
+                desc = "(OGG)"
+            elif frmt == "wav":
+                desc = "(Uncompressed)"
+            else:
+                desc = ""
+            buttons.data_button(f"{frmt.upper()} {desc}", f"ytq aq {audio_format}")
         buttons.data_button("Back", "ytq back", "footer")
         buttons.data_button("Cancel", "ytq cancel", "footer")
-        subbuttons = buttons.build_menu(3)
+        subbuttons = buttons.build_menu(2)
         msg = f"Choose Audio{i} Format:\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
         await edit_message(self._reply_to, msg, subbuttons)
 
@@ -240,11 +524,11 @@ class YtSelection:
         buttons = ButtonMaker()
         for qual in range(11):
             audio_format = f"{format}{qual}"
-            buttons.data_button(qual, f"ytq {audio_format}")
+            buttons.data_button(str(qual), f"ytq {audio_format}")
         buttons.data_button("Back", "ytq aq back")
         buttons.data_button("Cancel", "ytq aq cancel")
         subbuttons = buttons.build_menu(5)
-        msg = f"Choose Audio{i} Qaulity:\n0 is best and 10 is worst\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
+        msg = f"Choose Audio{i} Quality:\n0 is best and 10 is worst\nTimeout: {get_readable_time(self._timeout - (time() - self._time))}"
         await edit_message(self._reply_to, msg, subbuttons)
 
 
@@ -271,19 +555,21 @@ async def _mdisk(link, name):
 
 
 class YtDlp(TaskListener):
+    # pylint: disable=too-many-arguments
     def __init__(
         self,
         client,
         message,
-        _=None,
+        _=None,  # Placeholder for compatibility with Mirror class
         is_leech=False,
-        __=None,
-        ___=None,
-        same_dir=None,
-        bulk=None,
-        multi_tag=None,
-        options="",
+        # These parameters are unused but required for compatibility with Mirror class
+        **kwargs,
     ):
+        # Extract parameters from kwargs with defaults
+        same_dir = kwargs.get("same_dir", {})
+        bulk = kwargs.get("bulk", [])
+        multi_tag = kwargs.get("multi_tag")
+        options = kwargs.get("options", "")
         if same_dir is None:
             same_dir = {}
         if bulk is None:
@@ -306,7 +592,9 @@ class YtDlp(TaskListener):
         if error_msg:
             await delete_links(self.message)
             error = await send_message(self.message, error_msg, error_button)
-            return await auto_delete_message(error, time=300)
+            create_task(auto_delete_message(error, time=300))  # noqa: RUF006
+            return
+
         args = {
             "-doc": False,
             "-med": False,
@@ -321,6 +609,10 @@ class YtDlp(TaskListener):
             "-hl": False,
             "-bt": False,
             "-ut": False,
+            "-merge-video": False,
+            "-merge-audio": False,
+            "-merge-subtitle": False,
+            "-merge-all": False,
             "-i": 0,
             "-sp": 0,
             "link": "",
@@ -334,11 +626,40 @@ class YtDlp(TaskListener):
             "-cv": "",
             "-ns": "",
             "-md": "",
+            "-metadata-title": "",
+            "-metadata-author": "",
+            "-metadata-comment": "",
+            "-metadata-all": "",
+            "-metadata-video-title": "",
+            "-metadata-video-author": "",
+            "-metadata-video-comment": "",
+            "-metadata-audio-title": "",
+            "-metadata-audio-author": "",
+            "-metadata-audio-comment": "",
+            "-metadata-subtitle-title": "",
+            "-metadata-subtitle-author": "",
+            "-metadata-subtitle-comment": "",
             "-tl": "",
             "-ff": set(),
         }
 
+        # Parse arguments from the command
         arg_parser(input_list[1:], args)
+
+        # Check if media tools flags are enabled
+        from bot.helper.ext_utils.bot_utils import is_flag_enabled
+
+        # Disable flags that depend on disabled media tools
+        for flag in list(args.keys()):
+            if flag.startswith("-") and not is_flag_enabled(flag):
+                if isinstance(args[flag], bool):
+                    args[flag] = False
+                elif isinstance(args[flag], set):
+                    args[flag] = set()
+                elif isinstance(args[flag], str):
+                    args[flag] = ""
+                elif isinstance(args[flag], int):
+                    args[flag] = 0
 
         try:
             self.multi = int(args["-i"])
@@ -382,11 +703,28 @@ class YtDlp(TaskListener):
         self.as_doc = args["-doc"]
         self.as_med = args["-med"]
         self.metadata = args["-md"]
+        self.metadata_title = args["-metadata-title"]
+        self.metadata_author = args["-metadata-author"]
+        self.metadata_comment = args["-metadata-comment"]
+        self.metadata_all = args["-metadata-all"]
+        self.metadata_video_title = args["-metadata-video-title"]
+        self.metadata_video_author = args["-metadata-video-author"]
+        self.metadata_video_comment = args["-metadata-video-comment"]
+        self.metadata_audio_title = args["-metadata-audio-title"]
+        self.metadata_audio_author = args["-metadata-audio-author"]
+        self.metadata_audio_comment = args["-metadata-audio-comment"]
+        self.metadata_subtitle_title = args["-metadata-subtitle-title"]
+        self.metadata_subtitle_author = args["-metadata-subtitle-author"]
+        self.metadata_subtitle_comment = args["-metadata-subtitle-comment"]
         self.folder_name = (
             f"/{args['-m']}".rstrip("/") if len(args["-m"]) > 0 else ""
         )
         self.bot_trans = args["-bt"]
         self.user_trans = args["-ut"]
+        self.merge_video = args["-merge-video"]
+        self.merge_audio = args["-merge-audio"]
+        self.merge_subtitle = args["-merge-subtitle"]
+        self.merge_all = args["-merge-all"]
 
         is_bulk = args["-b"]
 
@@ -431,7 +769,7 @@ class YtDlp(TaskListener):
                             self.same_dir[fd_name]["total"] -= 1
         else:
             await self.init_bulk(input_list, bulk_start, bulk_end, YtDlp)
-            return None
+            return
 
         if len(self.bulk) != 0:
             del self.bulk[0]
@@ -446,13 +784,15 @@ class YtDlp(TaskListener):
             self.link = reply_to.text.split("\n", 1)[0].strip()
 
         if not is_url(self.link):
-            await send_message(
+            await delete_links(self.message)
+            usage_msg = await send_message(
                 self.message,
                 COMMAND_USAGE["yt"][0],
                 COMMAND_USAGE["yt"][1],
             )
+            create_task(auto_delete_message(usage_msg, time=300))  # noqa: RUF006
             await self.remove_from_same_dir()
-            return None
+            return
 
         if "mdisk.me" in self.link:
             self.name, self.link = await _mdisk(self.link, self.name)
@@ -460,11 +800,23 @@ class YtDlp(TaskListener):
         try:
             await self.before_start()
         except Exception as e:
-            await send_message(self.message, e)
+            await delete_links(self.message)
+            error_msg = await send_message(self.message, str(e))
+            create_task(auto_delete_message(error_msg, time=300))  # noqa: RUF006
             await self.remove_from_same_dir()
-            return None
+            return
 
-        options = {"usenetrc": True, "cookiefile": "cookies.txt"}
+        # Check for user-specific cookies
+        user_id = self.user_id
+        user_cookies_path = f"cookies/{user_id}.txt"
+
+        # Security check: Only use user's own cookies or the default cookies
+        if ospath.exists(user_cookies_path):
+            cookies_file = user_cookies_path
+        else:
+            cookies_file = "cookies.txt"
+
+        options = {"usenetrc": True, "cookiefile": cookies_file}
         if opt:
             for key, value in opt.items():
                 if key in ["postprocessors", "download_ranges"]:
@@ -478,13 +830,99 @@ class YtDlp(TaskListener):
                 options[key] = value
         options["playlist_items"] = "0"
 
+        # Log which cookies file is being used
+        if cookies_file == user_cookies_path:
+            LOGGER.info(f"Using user-specific cookies for user ID: {user_id}")
+        else:
+            LOGGER.info("Using default cookies.txt file")
+
         try:
+            # Log which client is being used for YouTube
+            if "youtube.com" in self.link or "youtu.be" in self.link:
+                LOGGER.info("Extracting YouTube video info with TV client")
+                # Add YouTube TV client settings to help with SSAP experiment issues
+                if "extractor_args" not in options:
+                    options["extractor_args"] = {
+                        "youtube": {
+                            "player_client": ["tv"],
+                            "player_skip": ["webpage"],
+                            "max_comments": [0],
+                            "skip_webpage": [True],
+                        }
+                    }
+                elif "youtube" not in options["extractor_args"]:
+                    options["extractor_args"]["youtube"] = {
+                        "player_client": ["tv"],
+                        "player_skip": ["webpage"],
+                        "max_comments": [0],
+                        "skip_webpage": [True],
+                    }
+
             result = await sync_to_async(extract_info, self.link, options)
         except Exception as e:
             msg = str(e).replace("<", " ").replace(">", " ")
-            await send_message(self.message, f"{self.tag} {msg}")
-            await self.remove_from_same_dir()
-            return None
+
+            # Handle YouTube SSAP experiment issues
+            if "youtube" in self.link.lower() and (
+                "Unable to extract video data" in msg
+                or "This video is unavailable" in msg
+                or "Sign in to confirm" in msg
+            ):
+                try:
+                    # Try with Android client
+                    if (
+                        "extractor_args" in options
+                        and "youtube" in options["extractor_args"]
+                    ):
+                        options["extractor_args"]["youtube"]["player_client"] = [
+                            "android"
+                        ]
+
+                    result = await sync_to_async(extract_info, self.link, options)
+                except Exception:
+                    try:
+                        # Last resort: try with web client
+                        if (
+                            "extractor_args" in options
+                            and "youtube" in options["extractor_args"]
+                        ):
+                            options["extractor_args"]["youtube"]["player_client"] = [
+                                "web"
+                            ]
+
+                        result = await sync_to_async(
+                            extract_info, self.link, options
+                        )
+                    except Exception:
+                        # All clients failed, report the original error
+                        msg = f"{msg}\n\nTried multiple YouTube clients but all failed. This might be due to the YouTube SSAP experiment or region restrictions."
+                        try:
+                            await self.on_download_error(msg)
+                        except Exception as err:
+                            LOGGER.error(f"Error in error handling: {err}")
+                            await delete_links(self.message)
+                            error_msg = await send_message(
+                                self.message, f"{self.tag} {msg}"
+                            )
+                            create_task(auto_delete_message(error_msg, time=300))  # noqa: RUF006
+                        finally:
+                            await self.remove_from_same_dir()
+                        return
+            else:
+                # Not a YouTube SSAP issue, handle normally
+                try:
+                    # Use self directly since YtDlp inherits from TaskListener
+                    # Don't add tag here as it will be added in on_download_error
+                    await self.on_download_error(msg)
+                except Exception as err:
+                    LOGGER.error(f"Error in error handling: {err}")
+                    # Fallback error handling
+                    await delete_links(self.message)
+                    error_msg = await send_message(self.message, f"{self.tag} {msg}")
+                    create_task(auto_delete_message(error_msg, time=300))  # noqa: RUF006
+                finally:
+                    await self.remove_from_same_dir()
+                return
         finally:
             await self.run_multi(input_list, YtDlp)
 
@@ -492,14 +930,14 @@ class YtDlp(TaskListener):
             qual = await YtSelection(self).get_quality(result)
             if qual is None:
                 await self.remove_from_same_dir()
-                return None
+                return
 
         LOGGER.info(f"Downloading with YT-DLP: {self.link}")
         playlist = "entries" in result
         ydl = YoutubeDLHelper(self)
         create_task(ydl.add_download(path, qual, playlist, opt))  # noqa: RUF006
         await delete_links(self.message)
-        return None
+        return
 
 
 async def ytdl(client, message):

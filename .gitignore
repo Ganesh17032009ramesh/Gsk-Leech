@@ -15,5 +15,7 @@ sabnzbd/*
 list_drives.txt
 shorteners.txt
 cookies.txt
+cookies/*
 downloads/*
 *.session
+__pycache__/

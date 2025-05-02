@@ -1,3 +1,5 @@
+import gc
+import math
 from asyncio import create_subprocess_exec, sleep, wait_for
 from asyncio.subprocess import PIPE
 from os import path as ospath
@@ -29,6 +31,7 @@ from bot.core.torrent_manager import TorrentManager
 
 from .bot_utils import cmd_exec, sync_to_async
 from .exceptions import NotSupportedExtractionArchive
+from .gc_utils import smart_garbage_collection
 
 ARCH_EXT = [
     ".tar.bz2",
@@ -142,9 +145,14 @@ async def clean_all():
     try:
         LOGGER.info("Cleaning Download Directory")
         await aiormtree(DOWNLOAD_DIR, ignore_errors=True)
-    except Exception:
-        pass
+    except Exception as e:
+        LOGGER.error(f"Error cleaning download directory: {e}")
+
+    # Ensure the download directory exists
     await aiomakedirs(DOWNLOAD_DIR, exist_ok=True)
+
+    # Force garbage collection after cleaning
+    smart_garbage_collection(aggressive=True)
 
 
 async def clean_unwanted(opath):
@@ -211,12 +219,43 @@ async def create_recursive_symlink(source, destination):
             LOGGER.error(f"Error creating shortcut for {source}: {e}")
 
 
-def get_mime_type(file_path):
+async def get_mime_type(file_path):
     if ospath.islink(file_path):
         file_path = readlink(file_path)
-    mime = Magic(mime=True)
-    mime_type = mime.from_file(file_path)
-    return mime_type or "text/plain"
+    try:
+        mime = Magic(mime=True)
+        mime_type = mime.from_file(file_path)
+        return mime_type or "text/plain"
+    except Exception as e:
+        LOGGER.error(f"Error getting mime type for {file_path}: {e}")
+        return "text/plain"
+    finally:
+        # Explicitly delete the Magic object to free resources
+        del mime
+        # Force garbage collection after handling large files
+        if ospath.getsize(file_path) > 100 * 1024 * 1024:  # 100MB
+            smart_garbage_collection(aggressive=False)
+
+
+# Non-async version for backward compatibility
+def get_mime_type_sync(file_path):
+    if ospath.islink(file_path):
+        file_path = readlink(file_path)
+    mime = None
+    try:
+        mime = Magic(mime=True)
+        mime_type = mime.from_file(file_path)
+        return mime_type or "text/plain"
+    except Exception as e:
+        LOGGER.error(f"Error getting mime type for {file_path}: {e}")
+        return "text/plain"
+    finally:
+        # Explicitly delete the Magic object to free resources
+        if mime:
+            del mime
+        # Force garbage collection after handling large files
+        if ospath.getsize(file_path) > 100 * 1024 * 1024:  # 100MB
+            gc.collect()
 
 
 async def remove_excluded_files(fpath, ee):
@@ -231,15 +270,19 @@ async def join_files(opath):
     results = []
     exists = False
     for file_ in files:
-        if re_search(r"\.0+2$", file_) and await sync_to_async(
-            get_mime_type,
-            f"{opath}/{file_}",
+        if re_search(r"\.0+2$", file_) and await get_mime_type(
+            f"{opath}/{file_}"
         ) not in ["application/x-7z-compressed", "application/zip"]:
             exists = True
             final_name = file_.rsplit(".", 1)[0]
             fpath = f"{opath}/{final_name}"
+
+            # Execute the command
             cmd = f'cat "{fpath}."* > "{fpath}"'
-            _, stderr, code = await cmd_exec(cmd, True)
+            _, stderr, code = await cmd_exec(
+                cmd,
+                shell=True,
+            )
             if code != 0:
                 LOGGER.error(f"Failed to join {final_name}, stderr: {stderr}")
                 if await aiopath.isfile(fpath):
@@ -248,7 +291,7 @@ async def join_files(opath):
                 results.append(final_name)
 
     if not exists:
-        LOGGER.warning("No files to join!")
+        pass
     elif results:
         LOGGER.info("Join Completed!")
         for res in results:
@@ -258,32 +301,115 @@ async def join_files(opath):
 
 
 async def split_file(f_path, split_size, listener):
+    """
+    Split a file into multiple parts using the Linux split command.
+
+    Args:
+        f_path: Path to the file to split
+        split_size: Size of each split in bytes
+        listener: Listener object for tracking progress and cancellation
+
+    Returns:
+        bool: True if splitting was successful, False otherwise
+    """
     out_path = f"{f_path}."
     if listener.is_cancelled:
         return False
-    listener.subproc = await create_subprocess_exec(
+
+    # Get file size for logging
+    try:
+        file_size = await aiopath.getsize(f_path)
+        file_size_gb = file_size / (1024 * 1024 * 1024)
+        parts = math.ceil(file_size / split_size)
+
+        # Log detailed information about the splitting operation
+        LOGGER.info(f"Splitting file: {f_path}")
+        LOGGER.info(f"File size: {file_size_gb:.2f} GiB")
+        LOGGER.info(f"Split size: {split_size / (1024 * 1024 * 1024):.2f} GiB")
+        LOGGER.info(f"Expected parts: {parts}")
+
+        # Add a safety check - if split size is too close to Telegram's limit, reduce it further
+        # This is an additional safety measure beyond what's in get_user_split_size
+        from bot.core.aeon_client import TgClient
+
+        telegram_limit = TgClient.MAX_SPLIT_SIZE
+        safety_margin = 20 * 1024 * 1024  # 20 MiB safety margin
+
+        if split_size > (telegram_limit - safety_margin):
+            split_size = telegram_limit - safety_margin
+            LOGGER.info(
+                f"{split_size / (1024 * 1024 * 1024):.2f} GiB for extra safety"
+            )
+    except Exception as e:
+        LOGGER.error(f"Error calculating file size: {e}")
+        # Continue with the split operation anyway
+
+    # Create the command
+    cmd = [
         "split",
         "--numeric-suffixes=1",
         "--suffix-length=3",
         f"--bytes={split_size}",
         f_path,
         out_path,
-        stderr=PIPE,
-    )
-    _, stderr = await listener.subproc.communicate()
-    code = listener.subproc.returncode
-    if listener.is_cancelled:
+    ]
+
+    # Execute the command
+    try:
+        listener.subproc = await create_subprocess_exec(
+            *cmd,
+            stderr=PIPE,
+        )
+
+        _, stderr = await listener.subproc.communicate()
+        code = listener.subproc.returncode
+
+        if listener.is_cancelled:
+            return False
+        if code == -9:
+            listener.is_cancelled = True
+            return False
+        if code != 0:
+            try:
+                stderr = stderr.decode().strip()
+            except Exception:
+                stderr = "Unable to decode the error!"
+            LOGGER.error(f"Split error: {stderr}. File: {f_path}")
+            return False
+
+        # Verify the split was successful by checking if at least one split file exists
+        import glob
+
+        split_pattern = f"{out_path}*"
+        split_files = glob.glob(split_pattern)
+
+        if not split_files:
+            LOGGER.error(
+                f"Split command completed but no split files were created: {f_path}"
+            )
+            return False
+
+        # Check the size of each split file to ensure none exceed Telegram's limit
+        for split_file in split_files:
+            try:
+                split_size = await aiopath.getsize(split_file)
+                split_size_gb = split_size / (1024 * 1024 * 1024)
+
+                if split_size > telegram_limit:
+                    LOGGER.error(
+                        f"Split file {split_file} is {split_size_gb:.2f} GiB, which exceeds "
+                        f"Telegram's {telegram_limit / (1024 * 1024 * 1024):.2f} GiB limit!"
+                    )
+                    # We don't return False here because we want to continue with the upload
+                    # The upload will fail for this file, but other files might still work
+            except Exception as e:
+                LOGGER.error(f"Error checking split file size: {e}")
+
+        LOGGER.info(f"Successfully split {f_path} into {len(split_files)} parts")
+        return True
+    except Exception as e:
+        LOGGER.error(f"Error during file splitting: {e}")
         return False
-    if code == -9:
-        listener.is_cancelled = True
-        return False
-    if code != 0:
-        try:
-            stderr = stderr.decode().strip()
-        except Exception:
-            stderr = "Unable to decode the error!"
-        LOGGER.error(f"{stderr}. Split Document: {f_path}")
-    return True
 
 
 class SevenZ:
@@ -360,6 +486,8 @@ class SevenZ:
             del cmd[2]
         if self._listener.is_cancelled:
             return False
+
+        # Execute the command
         self._listener.subproc = await create_subprocess_exec(
             *cmd,
             stdout=PIPE,
@@ -368,6 +496,7 @@ class SevenZ:
         await self._sevenz_progress()
         _, stderr = await self._listener.subproc.communicate()
         code = self._listener.subproc.returncode
+
         if self._listener.is_cancelled:
             return False
         if code == -9:
@@ -407,6 +536,8 @@ class SevenZ:
             LOGGER.info(f"Zip: orig_path: {dl_path}, zip_path: {up_path}")
         if self._listener.is_cancelled:
             return False
+
+        # Execute the command
         self._listener.subproc = await create_subprocess_exec(
             *cmd,
             stdout=PIPE,
@@ -415,6 +546,7 @@ class SevenZ:
         await self._sevenz_progress()
         _, stderr = await self._listener.subproc.communicate()
         code = self._listener.subproc.returncode
+
         if self._listener.is_cancelled:
             return False
         if code == -9:

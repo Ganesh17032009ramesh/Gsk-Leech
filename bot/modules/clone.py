@@ -1,4 +1,4 @@
-from asyncio import gather
+from asyncio import create_task, gather
 from json import loads
 from secrets import token_hex
 
@@ -72,7 +72,7 @@ class Clone(TaskListener):
         if error_msg:
             await delete_links(self.message)
             error = await send_message(self.message, error_msg, error_button)
-            return await auto_delete_message(error, time=300)
+            return create_task(auto_delete_message(error, time=300))
         args = {
             "link": "",
             "-i": 0,
@@ -119,12 +119,21 @@ class Clone(TaskListener):
         await self.run_multi(input_list, Clone)
 
         if len(self.link) == 0:
-            await send_message(
+            # When no valid link is provided, show usage menu and auto-delete after 5 minutes
+            usage_msg = await send_message(
                 self.message,
                 COMMAND_USAGE["clone"][0],
                 COMMAND_USAGE["clone"][1],
             )
+            create_task(auto_delete_message(usage_msg, time=300))  # noqa: RUF006
+            create_task(auto_delete_message(self.message, time=300))  # noqa: RUF006
+            if reply_to := self.message.reply_to_message:
+                create_task(auto_delete_message(reply_to, time=300))  # noqa: RUF006
             return None
+
+        # If we get here, it means we have a valid link, so delete command messages immediately
+        await delete_links(self.message)
+
         LOGGER.info(self.link)
         try:
             await self.before_start()

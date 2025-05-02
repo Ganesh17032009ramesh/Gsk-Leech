@@ -1,3 +1,4 @@
+from asyncio import sleep
 from functools import wraps
 from json import JSONDecodeError, dumps, loads
 
@@ -729,7 +730,8 @@ class Jddevice:
 class clientSession(AsyncClient):
     @wraps(AsyncClient.request)
     async def request(self, method: str, url: str, **kwargs):
-        kwargs.setdefault("timeout", 3)
+        # Increase timeout for better reliability
+        kwargs.setdefault("timeout", 10)
         kwargs.setdefault("follow_redirects", True)
         return await super().request(method, url, **kwargs)
 
@@ -772,16 +774,34 @@ class MyJdApi:
         data = data.replace('"null"', "null")
         data = data.replace("'null'", "null")
         request_url = self.__api_url + path
-        try:
-            res = await session.request(
-                "POST",
-                request_url,
-                headers={"Content-Type": "application/json; charset=utf-8"},
-                content=data,
-            )
-            response = res.text
-        except RequestError:
+
+        # Add retry logic for connection issues
+        max_retries = 3
+        retry_count = 0
+
+        while retry_count < max_retries:
+            try:
+                res = await session.request(
+                    "POST",
+                    request_url,
+                    headers={"Content-Type": "application/json; charset=utf-8"},
+                    content=data,
+                )
+                response = res.text
+                break  # Success, exit the retry loop
+            except RequestError:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    # All retries failed
+                    return None
+                # Wait before retrying (exponential backoff)
+                await sleep(2**retry_count)
+                continue
+
+        # If we got here but didn't get a response, return None
+        if "res" not in locals():
             return None
+
         if res.status_code != 200:
             try:
                 error_msg = loads(response)

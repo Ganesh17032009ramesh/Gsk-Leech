@@ -1,9 +1,13 @@
-from asyncio import gather, sleep
+from asyncio import create_task, gather, sleep
 
 from bot import LOGGER, intervals, nzb_jobs, nzb_listener_lock, sabnzbd_client
 from bot.helper.ext_utils.bot_utils import new_task
 from bot.helper.ext_utils.status_utils import get_task_by_gid
 from bot.helper.ext_utils.task_manager import stop_duplicate_check
+from bot.helper.telegram_helper.message_utils import (
+    auto_delete_message,
+    send_message,
+)
 
 
 async def _remove_job(nzo_id, mid):
@@ -22,10 +26,17 @@ async def _remove_job(nzo_id, mid):
 async def _on_download_error(err, nzo_id, button=None):
     if task := await get_task_by_gid(nzo_id):
         LOGGER.info(f"Cancelling Download: {task.name()}")
-        await gather(
-            task.listener.on_download_error(err, button),
-            _remove_job(nzo_id, task.listener.mid),
-        )
+        try:
+            await task.listener.on_download_error(err, button)
+        except Exception as e:
+            LOGGER.error(f"Failed to handle NZB error through listener: {e!s}")
+            # Fallback error handling
+            error_msg = await send_message(
+                task.listener.message,
+                f"{task.listener.tag} Download Error: {err}",
+            )
+            create_task(auto_delete_message(error_msg, time=300))  # noqa: RUF006
+        await _remove_job(nzo_id, task.listener.mid)
 
 
 @new_task

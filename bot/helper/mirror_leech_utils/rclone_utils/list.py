@@ -19,6 +19,7 @@ from bot.helper.ext_utils.status_utils import (
 )
 from bot.helper.telegram_helper.button_build import ButtonMaker
 from bot.helper.telegram_helper.message_utils import (
+    auto_delete_message,
     delete_message,
     edit_message,
     send_message,
@@ -117,11 +118,16 @@ async def path_updates(_, query, obj):
             if obj.config_path == "rclone.conf"
             else f"mrcc:{obj.remote}{obj.path}"
         )
-        if path != obj.listener.user_dict.get("RCLONE_PATH"):
-            update_user_ldata(obj.listener.user_id, "RCLONE_PATH", path)
-            await obj.get_path_buttons()
-            if Config.DATABASE_URL:
-                await database.update_user_data(obj.listener.user_id)
+        # Always update the path when the button is clicked
+        update_user_ldata(obj.listener.user_id, "RCLONE_PATH", path)
+        # Send a temporary message that will be auto-deleted
+        temp_msg = await send_message(
+            message, f"Default path set to: <code>{path}</code>"
+        )
+        await auto_delete_message(temp_msg, 5)  # Auto-delete after 5 seconds
+        await obj.get_path_buttons()
+        if Config.DATABASE_URL:
+            await database.update_user_data(obj.listener.user_id)
     elif data[1] == "owner":
         obj.config_path = "rclone.conf"
         obj.path = ""
@@ -259,8 +265,15 @@ class RcloneList:
             else "\nTransfer Type: <i>Upload</i>"
         )
         if self.list_status == "rcu":
-            default_path = Config.RCLONE_PATH
-            msg += f"\nDefault Rclone Path: {default_path}" if default_path else ""
+            user_default_path = self.listener.user_dict.get("RCLONE_PATH", "")
+            owner_default_path = Config.RCLONE_PATH
+
+            if user_default_path:
+                msg += f"\nYour Default Path: <code>{user_default_path}</code>"
+            elif owner_default_path:
+                msg += f"\nOwner's Default Path: <code>{owner_default_path}</code>"
+            else:
+                msg += "\nNo Default Path Set"
         msg += f"\n\nItems: {items_no}"
         if items_no > LIST_LIMIT:
             msg += f" | Page: {int(page)}/{pages} | Page Step: {self.page_step}"

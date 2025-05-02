@@ -1,4 +1,4 @@
-from asyncio import gather, iscoroutinefunction
+from asyncio import create_task, gather, iscoroutinefunction
 from time import time
 
 from psutil import cpu_percent, disk_usage, virtual_memory
@@ -52,9 +52,14 @@ async def get_download_status(download):
 
 @new_task
 async def task_status(_, message):
+    # Delete the /status command message immediately
+    await delete_message(message)
+
     async with task_dict_lock:
         count = len(task_dict)
+
     if count == 0:
+        # Send status message when no tasks
         currentTime = get_readable_time(time() - bot_start_time)
         free = get_readable_file_size(disk_usage(DOWNLOAD_DIR).free)
         msg = "No Active Tasks!\n"
@@ -63,8 +68,10 @@ async def task_status(_, message):
             f"\n<b>RAM:</b> {virtual_memory().percent}% | <b>UPTIME:</b> {currentTime}"
         )
         reply_message = await send_message(message, msg)
-        await auto_delete_message(message, reply_message)
+        # Auto delete status message after 5 minutes when no tasks
+        create_task(auto_delete_message(reply_message, time=300))  # noqa: RUF006
     else:
+        # Send status message when tasks are running
         text = message.text.split()
         if len(text) > 1:
             user_id = message.from_user.id if text[1] == "me" else int(text[1])
@@ -75,14 +82,20 @@ async def task_status(_, message):
                 obj.cancel()
                 del intervals["status"][sid]
         await send_status_message(message, user_id)
-        await delete_message(message)
 
 
 @new_task
 async def status_pages(_, query):
     data = query.data.split()
     key = int(data[1])
-    await query.answer()
+
+    # Handle query.answer() with proper error handling
+    try:
+        await query.answer()
+    except Exception:
+        # Continue processing even if answering the query fails
+        pass
+
     if data[2] == "ref":
         await update_status_message(key, force=True)
     elif data[2] in ["nex", "pre"]:
@@ -125,7 +138,9 @@ async def status_pages(_, query):
             "Pause": 0,
             "SamVid": 0,
             "ConvertMedia": 0,
+            "Compress": 0,
             "FFmpeg": 0,
+            "Trim": 0,
         }
         dl_speed = ds
         up_speed = 0
@@ -165,15 +180,19 @@ async def status_pages(_, query):
                         tasks["SamVid"] += 1
                     case MirrorStatus.STATUS_CONVERT:
                         tasks["ConvertMedia"] += 1
+                    case MirrorStatus.STATUS_COMPRESS:
+                        tasks["Compress"] += 1
+                    case MirrorStatus.STATUS_TRIM:
+                        tasks["Trim"] += 1
                     case MirrorStatus.STATUS_FFMPEG:
-                        tasks["FFMPEG"] += 1
+                        tasks["FFmpeg"] += 1
                     case _:
                         tasks["Download"] += 1
 
         msg = f"""<b>DL:</b> {tasks["Download"]} | <b>UP:</b> {tasks["Upload"]} | <b>SD:</b> {tasks["Seed"]} | <b>AR:</b> {tasks["Archive"]}
 <b>EX:</b> {tasks["Extract"]} | <b>SP:</b> {tasks["Split"]} | <b>QD:</b> {tasks["QueueDl"]} | <b>QU:</b> {tasks["QueueUp"]}
 <b>CL:</b> {tasks["Clone"]} | <b>CK:</b> {tasks["CheckUp"]} | <b>PA:</b> {tasks["Pause"]} | <b>SV:</b> {tasks["SamVid"]}
-<b>CM:</b> {tasks["ConvertMedia"]} | <b>FF:</b> {tasks["FFmpeg"]}
+<b>CM:</b> {tasks["ConvertMedia"]} | <b>CP:</b> {tasks["Compress"]} | <b>TR:</b> {tasks["Trim"]} | <b>FF:</b> {tasks["FFmpeg"]}
 
 <b>ODLS:</b> {get_readable_file_size(dl_speed)}/s
 <b>OULS:</b> {get_readable_file_size(up_speed)}/s

@@ -19,7 +19,19 @@ from bot.helper.telegram_helper.button_build import ButtonMaker
 
 async def error_check(message):
     msg, button = [], None
-    user = message.from_user or message.sender_chat
+
+    # Handle case where both message.from_user and message.sender_chat could be None
+    if message.from_user is None and message.sender_chat is None:
+        # For anonymous messages or system messages, we'll use a default approach
+        # We'll create a minimal user object with the chat ID as the user ID
+        class MinimalUser:
+            def __init__(self, chat_id):
+                self.id = chat_id
+
+        user = MinimalUser(message.chat.id)
+    else:
+        user = message.from_user or message.sender_chat
+
     user_id = user.id
     token_timeout = Config.TOKEN_TIMEOUT
     if Config.RSS_CHAT and user_id == int(Config.RSS_CHAT):
@@ -31,6 +43,14 @@ async def error_check(message):
             for channel_id in FSUB_IDS.split():
                 chat = await get_chat_info(int(channel_id))
                 if not chat:
+                    continue
+
+                # For channel messages or anonymous admins, we can't check membership
+                # So we'll skip the membership check for these messages
+                if message.from_user is None:
+                    LOGGER.info(
+                        f"Skipping FSUB check for channel {channel_id} - message from channel/anonymous in chat {message.chat.id}"
+                    )
                     continue
 
                 try:
@@ -62,7 +82,12 @@ async def error_check(message):
                     chat_id=user_id,
                     text="<b>Checking Access...</b>",
                 )
-                await temp_msg.delete()
+                # Use delete_message for immediate deletion instead of auto_delete_message
+                from bot.helper.telegram_helper.message_utils import (
+                    delete_message,
+                )
+
+                await delete_message(temp_msg)
             except Exception:
                 button = button or ButtonMaker()
                 button.data_button("Start", f"aeon {user_id} private", "header")
@@ -81,8 +106,14 @@ async def error_check(message):
         msg.append("NSFW detected")
 
     if msg:
-        username = message.from_user.username
-        tag = f"@{username}" if username else message.from_user.mention
+        # Check if message.from_user is not None before accessing its username
+        if message.from_user is None:
+            # Use a generic tag if from_user is None
+            tag = "User"
+        else:
+            username = message.from_user.username
+            tag = f"@{username}" if username else message.from_user.mention
+
         final_msg = f"Hey, <b>{tag}</b>!\n"
         for i, m in enumerate(msg, 1):
             final_msg += f"\n<blockquote><b>{i}</b>: {m}</blockquote>"
@@ -171,6 +202,12 @@ async def token_check(user_id, button=None):
 
     user_data.setdefault(user_id, {})
     data = user_data[user_id]
+
+    # Check if user is logged in with LOGIN_PASS
+    login_pass = Config.LOGIN_PASS
+    if login_pass and data.get("VERIFY_TOKEN", "") == login_pass:
+        return None, button
+
     data["TIME"] = await database.get_token_expiry(user_id)
     expire = data.get("TIME")
     isExpired = expire is None or (time() - expire) > token_timeout
@@ -189,6 +226,10 @@ async def token_check(user_id, button=None):
         )
         button.url_button("Collect token", short_link)
         msg = "Your token has expired, please collect a new token"
+
+        if login_pass:
+            msg += " or login with password using /login command."
+
         if Config.PAID_CHANNEL_ID and Config.PAID_CHANNEL_LINK:
             msg += " or subscribe to the paid channel for no token."
             button.url_button("Subscribe", Config.PAID_CHANNEL_LINK)

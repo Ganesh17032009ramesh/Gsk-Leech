@@ -15,7 +15,7 @@ async def get_download(nzo_id, old_info=None):
         if res := queue["queue"]["slots"]:
             slot = res[0]
             if msg := slot["labels"]:
-                LOGGER.warning(" | ".join(msg))
+                pass
             return slot
         history = await sabnzbd_client.get_history(nzo_ids=nzo_id)
         if res := history["history"]["slots"]:

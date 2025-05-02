@@ -46,8 +46,27 @@ async def authorize(_, message):
 async def unauthorize(_, message):
     msg = message.text.split()
     thread_id = None
+
+    # Handle special case for "all"
+    if len(msg) > 1 and msg[1].strip().lower() == "all":
+        # Unauthorize all authorized chats
+        unauthorized_count = 0
+        for chat_id in list(user_data.keys()):
+            if user_data[chat_id].get("AUTH"):
+                update_user_ldata(chat_id, "AUTH", False)
+                await database.update_user_data(chat_id)
+                unauthorized_count += 1
+
+        if unauthorized_count > 0:
+            msg = f"Successfully unauthorized {unauthorized_count} chat(s)"
+        else:
+            msg = "No authorized chats found to unauthorize"
+        await send_message(message, msg)
+        return
+
+    # Regular case for specific chat ID
     if len(msg) > 1:
-        if "|" in msg:
+        if "|" in msg[1]:
             chat_id, thread_id = list(map(int, msg[1].split("|")))
         else:
             chat_id = int(msg[1].strip())
@@ -59,6 +78,7 @@ async def unauthorize(_, message):
         if message.is_topic_message:
             thread_id = message.message_thread_id
         chat_id = message.chat.id
+
     if chat_id in user_data and user_data[chat_id].get("AUTH"):
         if thread_id is not None and thread_id in user_data[chat_id].get(
             "thread_ids",
